@@ -1,0 +1,71 @@
+# =============================================================================
+# FlowControl — local/production composition
+#
+# Brings up the FlowControl web application with persistent volumes for the
+# SQLite database and the private document vault.
+#
+# First run:
+#   1. cp .env.example .env   # then set SESSION_SECRET (required in production)
+#   2. docker compose up -d --build
+#   3. Initialize the database schema and seed the demo dataset once:
+#        docker compose exec app bunx prisma db push
+#        docker compose exec app bun prisma/seed.ts
+#
+# The container starts with NODE_ENV=production; a SESSION_SECRET of at least
+# 16 characters MUST be present in .env or login will fail closed
+# (see src/server/auth.ts).
+# =============================================================================
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: flowcontrol:latest
+    container_name: flowcontrol-app
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      # Overrides for the volume-backed paths inside the container.
+      DATABASE_URL: "file:/app/db/custom.db"
+      STORAGE_DIR: "/app/storage"
+    volumes:
+      - fc-db:/app/db          # SQLite database file
+      - fc-storage:/app/storage # private document vault (never web-served)
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:3000/api"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # Optional: PostgreSQL for production-grade deployments.
+  #
+  # FlowControl's Prisma schema deliberately avoids SQLite-specific column
+  # types, so switching to PostgreSQL requires only:
+  #   1. In prisma/schema.prisma:  provider = "postgresql"
+  #   2. DATABASE_URL=postgresql://user:pass@postgres:5432/flowcontrol
+  # See docs/DATABASE.md § "Migration path: SQLite to PostgreSQL".
+  #
+  # Enable with:  docker compose --profile postgres up -d
+  # ---------------------------------------------------------------------------
+  # postgres:
+  #   image: postgres:16-alpine
+  #   container_name: flowcontrol-postgres
+  #   profiles: ["postgres"]
+  #   environment:
+  #     POSTGRES_USER: flowcontrol
+  #     POSTGRES_PASSWORD: change-me
+  #     POSTGRES_DB: flowcontrol
+  #   volumes:
+  #     - fc-pgdata:/var/lib/postgresql/data
+  #   restart: unless-stopped
+
+volumes:
+  fc-db:
+  fc-storage:
+  # fc-pgdata:

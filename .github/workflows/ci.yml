@@ -1,0 +1,89 @@
+# =============================================================================
+# FlowControl — Continuous Integration
+#
+# Honest scope: this delivery contains NO automated test suite (delivery-
+# environment policy — see docs/LIMITATIONS.md and docs/DEVLOG.md). CI therefore
+# verifies what can be verified automatically:
+#   1. ESLint            (bun run lint)
+#   2. TypeScript        (bunx tsc --noEmit — the authoritative typecheck,
+#                         since next.config.ts sets typescript.ignoreBuildErrors)
+#   3. Prisma client     (bun run db:generate)
+#   4. Production build  (bun run build, with a throwaway DATABASE_URL)
+#
+# Verification of business behavior is performed by scripted end-to-end
+# browser verification of critical paths (login, RBAC, approval chain, SoD
+# block, audit chain) — see docs/DEVLOG.md Phase 4-6.
+# =============================================================================
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Lint, typecheck and build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Lint (ESLint)
+        run: bun run lint
+
+      - name: Typecheck (tsc --noEmit)
+        run: bunx tsc --noEmit
+
+      - name: Generate Prisma client
+        run: bun run db:generate
+        env:
+          # A schema-only step; a throwaway URL is sufficient.
+          DATABASE_URL: "file:./ci.db"
+
+      - name: Build (Next.js standalone)
+        run: bun run build
+        env:
+          # `next build` needs a resolvable DATABASE_URL (Prisma client is
+          # imported by route handlers). ci.db is a throwaway file that is
+          # never used at runtime.
+          DATABASE_URL: "file:./ci.db"
+          # Fail-closed secret required when the app boots in production mode.
+          # This is a CI-only placeholder, not a real secret.
+          SESSION_SECRET: "ci-only-placeholder-secret-0123456789abcdef"
+
+  # ---------------------------------------------------------------------------
+  # FUTURE: automated tests
+  #
+  # Automated tests are NOT part of this delivery; enable this job when a test
+  # suite is added (recommended: vitest for unit/integration tests of
+  # src/server/*, Playwright for end-to-end browser flows). Until then this
+  # job is intentionally commented out — do not claim CI "passes tests".
+  # ---------------------------------------------------------------------------
+  # test:
+  #   name: Automated tests (future)
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: oven-sh/setup-bun@v2
+  #       with:
+  #         bun-version: latest
+  #     - run: bun install
+  #     - run: bun test            # or: bunx vitest run && bunx playwright test
+  #       env:
+  #         DATABASE_URL: "file:./ci-test.db"
+  #         SESSION_SECRET: "ci-only-placeholder-secret-0123456789abcdef"

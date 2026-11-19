@@ -1,0 +1,386 @@
+// ============================================================================
+// FlowControl — Enterprise Workflow, Document Approval & Internal Control
+// Database schema (Prisma ORM)
+//
+// Portability note: this schema intentionally avoids SQLite-specific column
+// types (no String[] arrays, no Decimal). Money is stored as BigInt (whole
+// currency units). Switching to PostgreSQL requires only changing the
+// datasource provider to "postgresql" and the connection URL.
+//
+// Enumerated values (roles, statuses, actions, scopes) are stored as strings
+// and validated at the application boundary (zod schemas in src/server/*),
+// because Prisma does not support native enums on SQLite.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================================
+// Identity & Organization
+// ============================================================================
+
+model Department {
+  id        String   @id @default(cuid())
+  code      String   @unique
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users     User[]
+  documents Document[]
+  stages    WorkflowStage[]
+}
+
+model User {
+  id           String     @id @default(cuid())
+  email        String     @unique
+  name         String
+  passwordHash String
+  role         String // RoleKey — see src/server/rbac.ts
+  jobTitle     String?
+  departmentId String?
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  isActive     Boolean    @default(true)
+  failedLogins Int        @default(0)
+  lockedUntil  DateTime?
+  lastLoginAt  DateTime?
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  sessions            Session[]
+  documentsCreated    Document[]           @relation("DocumentCreator")
+  versionsUploaded    DocumentVersion[]    @relation("VersionUploader")
+  approvals           Approval[]
+  notifications       Notification[]
+  auditEvents         AuditEvent[]
+  delegationsGiven    ApprovalDelegation[] @relation("DelegationFrom")
+  delegationsReceived ApprovalDelegation[] @relation("DelegationTo")
+  exceptionSubjects   ControlException[]   @relation("ExceptionSubject")
+
+  @@index([role])
+  @@index([departmentId])
+  @@index([isActive])
+}
+
+model Session {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique // HMAC-SHA256(token, SESSION_SECRET) — raw token never stored
+  ip        String?
+  userAgent String?
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model LoginAttempt {
+  id        String   @id @default(cuid())
+  email     String
+  success   Boolean
+  reason    String? // OK | INVALID_CREDENTIALS | ACCOUNT_LOCKED | ACCOUNT_DISABLED
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([email, createdAt])
+  @@index([success, createdAt])
+}
+
+// ============================================================================
+// Document management
+// ============================================================================
+
+model DocumentCategory {
+  id               String   @id @default(cuid())
+  code             String   @unique
+  name             String
+  description      String?
+  requiredEvidence String? // JSON-encoded string[] of mandatory evidence items
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  documents Document[]
+  workflows Workflow[]
+}
+
+model Document {
+  id                    String            @id @default(cuid())
+  reference             String            @unique // DOC-2025-00001
+  title                 String
+  description           String?
+  categoryId            String
+  category              DocumentCategory  @relation(fields: [categoryId], references: [id])
+  departmentId          String
+  department            Department        @relation(fields: [departmentId], references: [id])
+  createdById           String
+  createdBy             User              @relation("DocumentCreator", fields: [createdById], references: [id])
+  supplierName          String?
+  currency              String            @default("MAD")
+  amount                BigInt // whole currency units
+  evidenceProvided      String? // JSON-encoded string[]
+  evidenceJustification String?
+  status                String            @default("DRAFT") // DRAFT|IN_REVIEW|APPROVED|REJECTED|RETURNED|CANCELLED
+  currentVersion        Int               @default(0)
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  versions   DocumentVersion[]
+  instances  WorkflowInstance[]
+  exceptions ControlException[]
+
+  @@index([status])
+  @@index([categoryId])
+  @@index([departmentId])
+  @@index([createdById])
+  @@index([createdAt])
+  @@index([amount])
+}
+
+model DocumentVersion {
+  id           String   @id @default(cuid())
+  documentId   String
+  document     Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  version      Int
+  fileName     String // original filename (display only)
+  storageKey   String // randomized filename inside STORAGE_DIR (never under /public)
+  mimeType     String
+  sizeBytes    Int
+  sha256       String
+  note         String?
+  uploadedById String
+  uploadedBy   User     @relation("VersionUploader", fields: [uploadedById], references: [id])
+  createdAt    DateTime @default(now())
+
+  approvals Approval[]
+
+  @@unique([documentId, version])
+  @@index([sha256])
+}
+
+// ============================================================================
+// Workflow engine
+// ============================================================================
+
+model Workflow {
+  id          String            @id @default(cuid())
+  code        String            @unique
+  name        String
+  description String?
+  categoryId  String
+  category    DocumentCategory  @relation(fields: [categoryId], references: [id])
+  isActive    Boolean           @default(true)
+  minAmount   BigInt?
+  maxAmount   BigInt?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  stages    WorkflowStage[]
+  instances WorkflowInstance[]
+
+  @@index([categoryId, isActive])
+}
+
+model WorkflowStage {
+  id              String      @id @default(cuid())
+  workflowId      String
+  workflow        Workflow    @relation(fields: [workflowId], references: [id], onDelete: Cascade)
+  sequence        Int // stages sharing a sequence execute in parallel
+  name            String
+  description     String?
+  approverRole    String // RoleKey of the acting user
+  departmentScope String      @default("ANY") // ANY | DOCUMENT | FIXED
+  departmentId    String? // set when scope = FIXED
+  department      Department? @relation(fields: [departmentId], references: [id], onDelete: SetNull)
+  minAmount       BigInt? // stage applies only within amount range
+  maxAmount       BigInt?
+  isRequired      Boolean     @default(true)
+  slaHours        Int?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  // Note: Approval rows reference stages by plain `stageId` scalar (snapshot
+  // semantics) so that workflow reconfiguration never rewrites approval history.
+
+  @@index([workflowId, sequence])
+}
+
+model WorkflowInstance {
+  id                   String    @id @default(cuid())
+  documentId           String
+  document             Document  @relation(fields: [documentId], references: [id], onDelete: Cascade)
+  workflowId           String
+  workflow             Workflow  @relation(fields: [workflowId], references: [id])
+  status               String    @default("IN_PROGRESS") // IN_PROGRESS|APPROVED|REJECTED|RETURNED_FOR_CORRECTION|CANCELLED|SUSPENDED
+  stagePath            String // JSON snapshot of resolved steps (immutable per cycle)
+  cycle                Int       @default(1)
+  currentStep          Int       @default(0) // index into stagePath steps
+  amount               BigInt // snapshot of document amount at submission
+  submittedAt          DateTime  @default(now())
+  currentStepStartedAt DateTime  @default(now())
+  completedAt          DateTime?
+  escalatedAt          DateTime?
+  lastOverdueCheckAt   DateTime?
+  returnCount          Int       @default(0)
+  suspendedById        String?
+  suspensionReason     String?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  approvals Approval[]
+
+  @@index([status])
+  @@index([documentId])
+  @@index([submittedAt])
+}
+
+model Approval {
+  id                String           @id @default(cuid())
+  instanceId        String
+  instance          WorkflowInstance @relation(fields: [instanceId], references: [id], onDelete: Cascade)
+  stageId           String // WorkflowStage id referenced by the snapshot
+  stageName         String // denormalized snapshot (config changes never rewrite history)
+  cycle             Int
+  stepIndex         Int
+  action            String // APPROVE | REJECT | RETURN_FOR_CORRECTION | COMMENT
+  userId            String
+  user              User             @relation(fields: [userId], references: [id])
+  userRole          String // snapshot of acting user's role
+  userDepartmentId  String? // snapshot
+  delegatedFromId   String? // acting on behalf of (delegation traceability)
+  documentVersionId String
+  documentVersion   DocumentVersion  @relation(fields: [documentVersionId], references: [id])
+  documentHash      String // SHA-256 of the exact reviewed version
+  comment           String?
+  ip                String?
+  createdAt         DateTime         @default(now())
+
+  @@index([instanceId, cycle, stepIndex])
+  @@index([userId, createdAt])
+}
+
+model ApprovalDelegation {
+  id          String    @id @default(cuid())
+  fromUserId  String
+  fromUser    User      @relation("DelegationFrom", fields: [fromUserId], references: [id], onDelete: Cascade)
+  toUserId    String
+  toUser      User      @relation("DelegationTo", fields: [toUserId], references: [id], onDelete: Cascade)
+  reason      String
+  startAt     DateTime
+  endAt        DateTime
+  isActive    Boolean   @default(true)
+  createdById String
+  createdAt   DateTime  @default(now())
+  revokedAt   DateTime?
+
+  @@index([toUserId, isActive])
+  @@index([fromUserId])
+}
+
+// ============================================================================
+// Notifications & email
+// ============================================================================
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String // INFO | ACTION_REQUIRED | ALERT | SYSTEM
+  title     String
+  body      String?
+  link      String? // e.g. "document:<id>"
+  isRead    Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId, isRead, createdAt])
+}
+
+model EmailLog {
+  id        String   @id @default(cuid())
+  toEmail   String
+  subject   String
+  status    String // SENT | SKIPPED_NO_SMTP | FAILED
+  detail    String?
+  createdAt DateTime @default(now())
+}
+
+// ============================================================================
+// Audit trail — append-only, hash-chained
+// ============================================================================
+
+model AuditEvent {
+  seq        Int      @id // monotonic sequence (autoincrement)
+  occurredAt DateTime @default(now())
+  actorId    String?
+  actor      User?    @relation(fields: [actorId], references: [id], onDelete: SetNull)
+  actorRole  String?
+  action     String // see AuditAction in src/server/audit.ts
+  entityType String?
+  entityId   String?
+  details    String? // canonical JSON (sorted keys)
+  ip         String?
+  prevHash   String // hash of the previous event ("GENESIS" for the first)
+  hash       String // SHA-256(seq|prevHash|occurredAt|actorId|action|entityType|entityId|details)
+
+  @@index([action])
+  @@index([entityType, entityId])
+  @@index([occurredAt])
+}
+
+// ============================================================================
+// Internal control configuration & exceptions
+// ============================================================================
+
+model SoDRule {
+  id          String   @id @default(cuid())
+  code        String   @unique
+  name        String
+  ruleType    String // SELF_APPROVAL | ROLE_PAIR | MULTI_STAGE_SAME_USER
+  roleA       String? // for ROLE_PAIR
+  roleB       String? // for ROLE_PAIR
+  severity    String   @default("HIGH")
+  description String?
+  isActive    Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model ApprovalRule {
+  id        String   @id @default(cuid())
+  role      String   @unique // RoleKey
+  maxAmount BigInt? // null = unlimited, 0 = cannot approve at all
+  currency  String   @default("MAD")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+model ControlException {
+  id         String    @id @default(cuid())
+  type       String // SOD_SELF_APPROVAL | SOD_ROLE_PAIR | SOD_MULTI_STAGE | THRESHOLD_BREACH |
+                    // OVERDUE_STAGE | REPEATED_RETURN | REPEATED_REJECTION | FAST_TRACK_SEQUENCE |
+                    // MISSING_EVIDENCE | UNAUTHORIZED_ACCESS
+  severity   String    @default("MEDIUM")
+  message    String
+  documentId String?
+  document   Document? @relation(fields: [documentId], references: [id], onDelete: SetNull)
+  instanceId String?
+  userId     String? // subject of the exception
+  subject    User?     @relation("ExceptionSubject", fields: [userId], references: [id], onDelete: SetNull)
+  details    String? // JSON
+  detectedAt DateTime  @default(now())
+  resolvedAt DateTime?
+  resolution String?
+
+  @@index([type, detectedAt])
+  @@index([resolvedAt])
+  @@index([documentId])
+}

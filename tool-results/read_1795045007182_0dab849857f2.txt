@@ -1,0 +1,1015 @@
+     1→// ============================================================================
+     2→// FlowControl — Workflow Engine
+     3→//
+     4→// All workflow business logic lives here (never in views/routes):
+     5→//   - Stage path resolution (amount-conditional, parallel steps by sequence)
+     6→//   - Submission, resubmission cycles, cancellation, suspension
+     7→//   - Approve / Reject / Return-for-correction / Comment with:
+     8→//       * role + department-scope eligibility (incl. delegation)
+     9→//       * segregation-of-duties enforcement (self-approval, multi-stage)
+    10→//       * per-role approval thresholds
+    11→//       * explicit confirmation requirement
+    12→//   - Optimistic concurrency: instance state advances via compare-and-swap
+    13→//     (UPDATE ... WHERE status AND currentStep match), so two users acting
+    14→//     simultaneously can never double-advance or double-approve a stage.
+    15→//
+    16→// Blocked control violations (SoD, threshold, unauthorized access) are
+    17→// COMMITTED to the database (ControlException + audit event) and only then
+    18→// surfaced as API errors — committing the evidence of the attempt matters
+    19→// more than the HTTP status code.
+    20→// ============================================================================
+    21→
+    22→import { db } from '@/lib/db'
+    23→import { Prisma } from '@prisma/client'
+    24→import type { WorkflowInstance, Document, DocumentCategory, Department } from '@prisma/client'
+    25→import { hasPermission, type RoleKey, type SessionUser } from './rbac'
+    26→import { recordAudit } from './audit'
+    27→import { notify } from './notify'
+    28→
+    29→export type StageSnapshot = {
+    30→  stageId: string
+    31→  name: string
+    32→  approverRole: RoleKey
+    33→  departmentScope: 'ANY' | 'DOCUMENT' | 'FIXED'
+    34→  departmentId: string | null
+    35→  isRequired: boolean
+    36→  slaHours: number | null
+    37→}
+    38→
+    39→export type StepSnapshot = {
+    40→  sequence: number
+    41→  stages: StageSnapshot[]
+    42→}
+    43→
+    44→export type StagePath = StepSnapshot[]
+    45→
+    46→export const DECISIVE_ACTIONS = ['APPROVE', 'REJECT', 'RETURN_FOR_CORRECTION'] as const
+    47→export type DecisiveAction = (typeof DECISIVE_ACTIONS)[number]
+    48→export type ApprovalAction = DecisiveAction | 'COMMENT'
+    49→
+    50→/** Amount window filter used for both workflow and stage resolution. */
+    51→function inAmountRange(amount: bigint, min: bigint | null, max: bigint | null): boolean {
+    52→  if (min !== null && amount < min) return false
+    53→  if (max !== null && amount > max) return false
+    54→  return true
+    55→}
+    56→
+    57→/**
+    58→ * Resolve the ordered list of steps for a given workflow and amount.
+    59→ * Stages sharing a `sequence` form ONE parallel step; different sequences
+    60→ * are strictly sequential. Stages may carry their own amount conditions
+    61→ * (e.g. "General Director required only above 100,000").
+    62→ */
+    63→export function resolveStagePath(
+    64→  stages: {
+    65→    id: string
+    66→    sequence: number
+    67→    name: string
+    68→    approverRole: string
+    69→    departmentScope: string
+    70→    departmentId: string | null
+    71→    minAmount: bigint | null
+    72→    maxAmount: bigint | null
+    73→    isRequired: boolean
+    74→    slaHours: number | null
+    75→  }[],
+    76→  amount: bigint,
+    77→): StagePath {
+    78→  const bySequence = new Map<number, StepSnapshot>()
+    79→  for (const s of stages) {
+    80→    if (!inAmountRange(amount, s.minAmount, s.maxAmount)) continue
+    81→    const stage: StageSnapshot = {
+    82→      stageId: s.id,
+    83→      name: s.name,
+    84→      approverRole: s.approverRole as RoleKey,
+    85→      departmentScope: (['ANY', 'DOCUMENT', 'FIXED'] as const).includes(
+    86→        s.departmentScope as 'ANY' | 'DOCUMENT' | 'FIXED',
+    87→      )
+    88→        ? (s.departmentScope as StageSnapshot['departmentScope'])
+    89→        : 'ANY',
+    90→      departmentId: s.departmentId,
+    91→      isRequired: s.isRequired,
+    92→      slaHours: s.slaHours,
+    93→    }
+    94→    const step = bySequence.get(s.sequence) ?? { sequence: s.sequence, stages: [] }
+    95→    step.stages.push(stage)
+    96→    bySequence.set(s.sequence, step)
+    97→  }
+    98→  return [...bySequence.values()].sort((a, b) => a.sequence - b.sequence)
+    99→}
+   100→
+   101→export function parseStagePath(instance: WorkflowInstance): StagePath {
+   102→  try {
+   103→    const parsed = JSON.parse(instance.stagePath) as StagePath
+   104→    if (!Array.isArray(parsed)) return []
+   105→    return parsed
+   106→  } catch {
+   107→    return []
+   108→  }
+   109→}
+   110→
+   111→export function currentStepOf(instance: WorkflowInstance): StepSnapshot | null {
+   112→  const path = parseStagePath(instance)
+   113→  return path[instance.currentStep] ?? null
+   114→}
+   115→
+   116→/** Users whose role/scope make them direct approvers for a snapshot stage. */
+   117→function userMatchesStage(
+   118→  user: { role: string; departmentId: string | null; isActive: boolean },
+   119→  stage: StageSnapshot,
+   120→  document: { departmentId: string },
+   121→): boolean {
+   122→  if (!user.isActive) return false
+   123→  if (user.role !== stage.approverRole) return false
+   124→  switch (stage.departmentScope) {
+   125→    case 'ANY':
+   126→      return true
+   127→    case 'DOCUMENT':
+   128→      return user.departmentId === document.departmentId
+   129→    case 'FIXED':
+   130→      return stage.departmentId !== null && user.departmentId === stage.departmentId
+   131→    default:
+   132→      return false
+   133→  }
+   134→}
+   135→
+   136→export type EligibleStage = { stage: StageSnapshot; delegatedFromId: string | null; delegatorName: string | null }
+   137→
+   138→/**
+   139→ * Determine which stages of the CURRENT step the user may act upon, either
+   140→ * directly or through an active delegation. Already-decided stages (this
+   141→ * cycle + step) are excluded.
+   142→ */
+   143→export async function eligibleStagesForUser(
+   144→  tx: Prisma.TransactionClient | typeof db,
+   145→  user: SessionUser,
+   146→  instance: WorkflowInstance,
+   147→  document: Document,
+   148→): Promise<EligibleStage[]> {
+   149→  const step = currentStepOf(instance)
+   150→  if (!step) return []
+   151→  const decided = await tx.approval.findMany({
+   152→    where: {
+   153→      instanceId: instance.id,
+   154→      cycle: instance.cycle,
+   155→      stepIndex: instance.currentStep,
+   156→      action: { in: [...DECISIVE_ACTIONS] },
+   157→    },
+   158→    select: { stageId: true },
+   159→  })
+   160→  const decidedIds = new Set(decided.map((d) => d.stageId))
+   161→
+   162→  const result: EligibleStage[] = []
+   163→  const self = { role: user.role, departmentId: user.departmentId, isActive: true }
+   164→
+   165→  // Active delegations TO the current user (delegation traceability).
+   166→  const now = new Date()
+   167→  const delegations = await tx.approvalDelegation.findMany({
+   168→    where: {
+   169→      toUserId: user.id,
+   170→      isActive: true,
+   171→      revokedAt: null,
+   172→      startAt: { lte: now },
+   173→      endAt: { gte: now },
+   174→    },
+   175→    include: { fromUser: { select: { id: true, name: true, role: true, departmentId: true, isActive: true } } },
+   176→  })
+   177→
+   178→  for (const stage of step.stages) {
+   179→    if (decidedIds.has(stage.stageId)) continue
+   180→    if (userMatchesStage(self, stage, document)) {
+   181→      result.push({ stage, delegatedFromId: null, delegatorName: null })
+   182→      continue
+   183→    }
+   184→    for (const d of delegations) {
+   185→      if (userMatchesStage(d.fromUser, stage, document)) {
+   186→        result.push({ stage, delegatedFromId: d.fromUser.id, delegatorName: d.fromUser.name })
+   187→        break
+   188→      }
+   189→    }
+   190→  }
+   191→  return result
+   192→}
+   193→
+   194→// ---------------------------------------------------------------------------
+   195→// Control-violation helper: records a ControlException + audit event inside
+   196→// the current transaction so the evidence persists even though the action
+   197→// itself is refused.
+   198→// ---------------------------------------------------------------------------
+   199→
+   200→async function recordViolation(
+   201→  tx: Prisma.TransactionClient,
+   202→  params: {
+   203→    type: string
+   204→    severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL'
+   205→    message: string
+   206→    documentId?: string | null
+   207→    instanceId?: string | null
+   208→    userId?: string | null
+   209→    details?: Record<string, unknown>
+   210→    actor?: SessionUser | null
+   211→    ip?: string | null
+   212→    auditAction?: 'SOD_VIOLATION_BLOCKED' | 'THRESHOLD_BREACH_BLOCKED' | 'UNAUTHORIZED_ACCESS_BLOCKED'
+   213→  },
+   214→): Promise<void> {
+   215→  await tx.controlException.create({
+   216→    data: {
+   217→      type: params.type,
+   218→      severity: params.severity,
+   219→      message: params.message,
+   220→      documentId: params.documentId ?? null,
+   221→      instanceId: params.instanceId ?? null,
+   222→      userId: params.userId ?? null,
+   223→      details: params.details ? JSON.stringify(params.details) : null,
+   224→    },
+   225→  })
+   226→  await recordAudit(tx, {
+   227→    actor: params.actor ? { id: params.actor.id, role: params.actor.role } : null,
+   228→    action: params.auditAction ?? 'UNAUTHORIZED_ACCESS_BLOCKED',
+   229→    entityType: 'document',
+   230→    entityId: params.documentId ?? undefined,
+   231→    details: { type: params.type, message: params.message, ...params.details },
+   232→    ip: params.ip ?? null,
+   233→  })
+   234→}
+   235→
+   236→// ---------------------------------------------------------------------------
+   237→// Submission
+   238→// ---------------------------------------------------------------------------
+   239→
+   240→export type SubmitResult =
+   241→  | { ok: true; instanceId: string; startedSteps: number }
+   242→  | { ok: false; status: number; code: string; message: string }
+   243→
+   244→export async function submitDocument(params: {
+   245→  user: SessionUser
+   246→  documentId: string
+   247→  ip?: string | null
+   248→}): Promise<SubmitResult> {
+   249→  const fail = (status: number, code: string, message: string): SubmitResult => ({ ok: false, status, code, message })
+   250→
+   251→  return db.$transaction(async (tx) => {
+   252→    const document = await tx.document.findUnique({
+   253→      where: { id: params.documentId },
+   254→      include: { category: true, createdBy: { select: { id: true, name: true } } },
+   255→    })
+   256→    if (!document) return fail(404, 'NOT_FOUND', 'Document not found.')
+   257→    if (document.createdById !== params.user.id && params.user.role !== 'SUPER_ADMIN') {
+   258→      return fail(403, 'FORBIDDEN', 'Only the creator (or an administrator) may submit this document.')
+   259→    }
+   260→    if (document.status !== 'DRAFT' && document.status !== 'RETURNED') {
+   261→      return fail(409, 'INVALID_STATE', `Document cannot be submitted from status ${document.status}.`)
+   262→    }
+   263→
+   264→    // --- Mandatory supporting evidence control -----------------------------
+   265→    const requiredEvidence: string[] = (() => {
+   266→      try {
+   267→        return JSON.parse(document.category.requiredEvidence ?? '[]')
+   268→      } catch {
+   269→        return []
+   270→      }
+   271→    })()
+   272→    const providedEvidence: string[] = (() => {
+   273→      try {
+   274→        return JSON.parse(document.evidenceProvided ?? '[]')
+   275→      } catch {
+   276→        return []
+   277→      }
+   278→    })()
+   279→    const missing = requiredEvidence.filter((r) => !providedEvidence.includes(r))
+   280→    if (missing.length > 0 && !document.evidenceJustification) {
+   281→      return fail(422, 'EVIDENCE_MISSING', `Mandatory evidence missing: ${missing.join(', ')}. Attach the evidence or provide a written justification.`)
+   282→    }
+   283→    if (missing.length > 0 && document.evidenceJustification) {
+   284→      // Justified exception — recorded, not silently ignored.
+   285→      await tx.controlException.create({
+   286→        data: {
+   287→          type: 'MISSING_EVIDENCE',
+   288→          severity: 'MEDIUM',
+   289→          message: `Submission without mandatory evidence (${missing.join(', ')}) — justification recorded.`,
+   290→          documentId: document.id,
+   291→          details: JSON.stringify({ missing, justification: document.evidenceJustification }),
+   292→        },
+   293→      })
+   294→      await recordAudit(tx, {
+   295→        actor: { id: params.user.id, role: params.user.role },
+   296→        action: 'EVIDENCE_EXCEPTION_RECORDED',
+   297→        entityType: 'document',
+   298→        entityId: document.id,
+   299→        details: { missing, justification: document.evidenceJustification },
+   300→        ip: params.ip ?? null,
+   301→      })
+   302→    }
+   303→
+   304→    // --- Workflow resolution -----------------------------------------------
+   305→    const workflows = await tx.workflow.findMany({
+   306→      where: { categoryId: document.categoryId, isActive: true },
+   307→      include: { stages: true },
+   308→    })
+   309→    const matching = workflows.filter((w) => inAmountRange(document.amount, w.minAmount, w.maxAmount))
+   310→    if (matching.length === 0) {
+   311→      return fail(422, 'NO_WORKFLOW', 'No active workflow is configured for this document category and amount. Contact an administrator.')
+   312→    }
+   313→    // Deterministic choice when several workflows overlap: the most recently
+   314→    // updated one wins (documented assumption — administrators should avoid
+   315→    // overlapping configurations).
+   316→    const workflow = matching.sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0]
+   317→    const path = resolveStagePath(workflow.stages, document.amount)
+   318→    if (path.length === 0) {
+   319→      return fail(422, 'NO_STAGES', 'The matched workflow defines no approval stages for this amount. Contact an administrator.')
+   320→    }
+   321→
+   322→    const now = new Date()
+   323→    let instance: WorkflowInstance
+   324→    if (document.status === 'RETURNED') {
+   325→      // Resubmission after "return for correction": the same instance moves to
+   326→      // a new review cycle, restarting from step 1. Full history is preserved.
+   327→      const previous = await tx.workflowInstance.findFirst({
+   328→        where: { documentId: document.id, status: 'RETURNED_FOR_CORRECTION' },
+   329→        orderBy: { createdAt: 'desc' },
+   330→      })
+   331→      if (!previous) return fail(409, 'INVALID_STATE', 'Document is marked returned but no return instance exists.')
+   332→      instance = await tx.workflowInstance.update({
+   333→        where: { id: previous.id },
+   334→        data: {
+   335→          status: 'IN_PROGRESS',
+   336→          cycle: { increment: 1 },
+   337→          stagePath: JSON.stringify(path),
+   338→          currentStep: 0,
+   339→          currentStepStartedAt: now,
+   340→          submittedAt: now,
+   341→          escalatedAt: null,
+   342→          lastOverdueCheckAt: null,
+   343→          amount: document.amount,
+   344→        },
+   345→      })
+   346→    } else {
+   347→      instance = await tx.workflowInstance.create({
+   348→        data: {
+   349→          documentId: document.id,
+   350→          workflowId: workflow.id,
+   351→          status: 'IN_PROGRESS',
+   352→          stagePath: JSON.stringify(path),
+   353→          cycle: 1,
+   354→          currentStep: 0,
+   355→          amount: document.amount,
+   356→          submittedAt: now,
+   357→          currentStepStartedAt: now,
+   358→        },
+   359→      })
+   360→    }
+   361→
+   362→    await tx.document.update({ where: { id: document.id }, data: { status: 'IN_REVIEW' } })
+   363→
+   364→    const isResubmission = document.status === 'RETURNED'
+   365→    await recordAudit(tx, {
+   366→      actor: { id: params.user.id, role: params.user.role },
+   367→      action: isResubmission ? 'REQUEST_RESUBMITTED' : 'REQUEST_SUBMITTED',
+   368→      entityType: 'document',
+   369→      entityId: document.id,
+   370→      details: {
+   371→        reference: document.reference,
+   372→        title: document.title,
+   373→        amount: document.amount.toString(),
+   374→        currency: document.currency,
+   375→        workflow: workflow.name,
+   376→        cycle: instance.cycle,
+   377→        steps: path.map((s) => s.stages.map((st) => st.name).join(' + ')),
+   378→      },
+   379→      ip: params.ip ?? null,
+   380→    })
+   381→
+   382→    await notifyStepApprovers(tx, instance, document, path[0])
+   383→    await notify(tx, {
+   384→      userId: document.createdById,
+   385→      type: 'INFO',
+   386→      title: isResubmission
+   387→        ? `${document.reference} resubmitted for approval (cycle ${instance.cycle})`
+   388→        : `${document.reference} submitted for approval`,
+   389→      body: `Workflow "${workflow.name}" — ${path.length} step(s).`,
+   390→      link: `document:${document.id}`,
+   391→    })
+   392→
+   393→    return { ok: true, instanceId: instance.id, startedSteps: path.length }
+   394→  })
+   395→}
+   396→
+   397→/** Notify all users eligible to act on the given step. */
+   398→async function notifyStepApprovers(
+   399→  tx: Prisma.TransactionClient,
+   400→  instance: WorkflowInstance,
+   401→  document: Document,
+   402→  step: StepSnapshot,
+   403→): Promise<void> {
+   404→  const notified = new Set<string>()
+   405→  for (const stage of step.stages) {
+   406→    const where: Prisma.UserWhereInput = { role: stage.approverRole, isActive: true }
+   407→    if (stage.departmentScope === 'DOCUMENT') where.departmentId = document.departmentId
+   408→    if (stage.departmentScope === 'FIXED' && stage.departmentId) where.departmentId = stage.departmentId
+   409→    const users = await tx.user.findMany({ where, select: { id: true } })
+   410→    for (const u of users) {
+   411→      if (notified.has(u.id)) continue
+   412→      notified.add(u.id)
+   413→      await notify(tx, {
+   414→        userId: u.id,
+   415→        type: 'ACTION_REQUIRED',
+   416→        title: `Approval required: ${document.reference} — ${stage.name}`,
+   417→        body: `"${document.title}" (${document.currency} ${document.amount.toString()}) is waiting for your decision.`,
+   418→        link: `document:${document.id}`,
+   419→        email: true,
+   420→      })
+   421→    }
+   422→  }
+   423→}
+   424→
+   425→// ---------------------------------------------------------------------------
+   426→// Acting on an instance (approve / reject / return / comment)
+   427→// ---------------------------------------------------------------------------
+   428→
+   429→export type ActOutcome =
+   430→  | { ok: true; message: string; instanceStatus: string; documentStatus: string }
+   431→  | { ok: false; status: number; code: string; message: string }
+   432→
+   433→export async function actOnInstance(params: {
+   434→  user: SessionUser
+   435→  instanceId: string
+   436→  action: ApprovalAction
+   437→  comment?: string | null
+   438→  confirm: boolean
+   439→  stageId?: string | null
+   440→  ip?: string | null
+   441→}): Promise<ActOutcome> {
+   442→  if (!params.confirm) {
+   443→    return { ok: false, status: 400, code: 'CONFIRMATION_REQUIRED', message: 'Explicit confirmation is required for approval actions.' }
+   444→  }
+   445→
+   446→  return db.$transaction(async (tx): Promise<ActOutcome> => {
+   447→    const instance = await tx.workflowInstance.findUnique({
+   448→      where: { id: params.instanceId },
+   449→      include: { document: { include: { category: true } } },
+   450→    })
+   451→    if (!instance) return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Approval task not found.' }
+   452→    const document = instance.document
+   453→    const actor = { id: params.user.id, role: params.user.role }
+   454→
+   455→    if (instance.status === 'SUSPENDED') {
+   456→      return { ok: false, status: 409, code: 'SUSPENDED', message: 'This workflow is suspended by an administrator; no actions are possible.' }
+   457→    }
+   458→    if (instance.status !== 'IN_PROGRESS') {
+   459→      return { ok: false, status: 409, code: 'INVALID_STATE', message: `This request is no longer awaiting action (status: ${instance.status}).` }
+   460→    }
+   461→
+   462→    // ---- COMMENT: no state change, full audit trail ------------------------
+   463→    if (params.action === 'COMMENT') {
+   464→      const eligible = await eligibleStagesForUser(tx, params.user, instance, document)
+   465→      const mayComment =
+   466→        eligible.length > 0 ||
+   467→        document.createdById === params.user.id ||
+   468→        params.user.role === 'SUPER_ADMIN'
+   469→      if (!mayComment) {
+   470→        await recordViolation(tx, {
+   471→          type: 'UNAUTHORIZED_ACCESS',
+   472→          severity: 'MEDIUM',
+   473→          message: `User ${params.user.email} attempted to comment on ${document.reference} without being a participant.`,
+   474→          documentId: document.id,
+   475→          instanceId: instance.id,
+   476→          userId: params.user.id,
+   477→          actor: params.user,
+   478→          ip: params.ip,
+   479→          auditAction: 'UNAUTHORIZED_ACCESS_BLOCKED',
+   480→        })
+   481→        return { ok: false, status: 403, code: 'FORBIDDEN', message: 'You are not a participant of this request.' }
+   482→      }
+   483→      if (!params.comment || params.comment.trim().length === 0) {
+   484→        return { ok: false, status: 422, code: 'COMMENT_REQUIRED', message: 'A comment text is required.' }
+   485→      }
+   486→      const version = await tx.documentVersion.findFirst({
+   487→        where: { documentId: document.id, version: document.currentVersion },
+   488→      })
+   489→      if (!version) return { ok: false, status: 500, code: 'NO_VERSION', message: 'Document version not found.' }
+   490→      await tx.approval.create({
+   491→        data: {
+   492→          instanceId: instance.id,
+   493→          stageId: 'COMMENT',
+   494→          stageName: 'Comment',
+   495→          cycle: instance.cycle,
+   496→          stepIndex: instance.currentStep,
+   497→          action: 'COMMENT',
+   498→          userId: params.user.id,
+   499→          userRole: params.user.role,
+   500→          userDepartmentId: params.user.departmentId,
+   501→          documentVersionId: version.id,
+   502→          documentHash: version.sha256,
+   503→          comment: params.comment.trim(),
+   504→          ip: params.ip ?? null,
+   505→        },
+   506→      })
+   507→      await recordAudit(tx, {
+   508→        actor,
+   509→        action: 'COMMENT_ADDED',
+   510→        entityType: 'document',
+   511→        entityId: document.id,
+   512→        details: { reference: document.reference, comment: params.comment.trim().slice(0, 500) },
+   513→        ip: params.ip ?? null,
+   514→      })
+   515→      return { ok: true, message: 'Comment added.', instanceStatus: instance.status, documentStatus: document.status }
+   516→    }
+   517→
+   518→    // ---- Eligibility --------------------------------------------------------
+   519→    const eligible = await eligibleStagesForUser(tx, params.user, instance, document)
+   520→    const target = params.stageId ? eligible.find((e) => e.stage.stageId === params.stageId) : eligible[0]
+   521→    if (!target) {
+   522→      await recordViolation(tx, {
+   523→        type: 'UNAUTHORIZED_ACCESS',
+   524→        severity: 'MEDIUM',
+   525→        message: `User ${params.user.email} attempted to act on ${document.reference} without authorization for the current stage.`,
+   526→        documentId: document.id,
+   527→        instanceId: instance.id,
+   528→        userId: params.user.id,
+   529→        actor: params.user,
+   530→        ip: params.ip,
+   531→        auditAction: 'UNAUTHORIZED_ACCESS_BLOCKED',
+   532→      })
+   533→      return { ok: false, status: 403, code: 'FORBIDDEN', message: 'You are not authorized to act on the current stage of this request.' }
+   534→    }
+   535→    const stage = target.stage
+   536→    const delegatedFromId = target.delegatedFromId
+   537→
+   538→    // ---- Segregation of duties: self-approval -------------------------------
+   539→    const selfApprovalRule = await tx.soDRule.findFirst({ where: { ruleType: 'SELF_APPROVAL', isActive: true } })
+   540→    if (selfApprovalRule && params.user.id === document.createdById) {
+   541→      await recordViolation(tx, {
+   542→        type: 'SOD_SELF_APPROVAL',
+   543→        severity: 'CRITICAL',
+   544→        message: `Self-approval attempt blocked: ${params.user.email} created ${document.reference} and attempted to approve it.`,
+   545→        documentId: document.id,
+   546→        instanceId: instance.id,
+   547→        userId: params.user.id,
+   548→        details: { stage: stage.name, action: params.action },
+   549→        actor: params.user,
+   550→        ip: params.ip,
+   551→        auditAction: 'SOD_VIOLATION_BLOCKED',
+   552→      })
+   553→      return {
+   554→        ok: false,
+   555→        status: 403,
+   556→        code: 'SOD_SELF_APPROVAL',
+   557→        message: 'Segregation of duties: you cannot approve a request you created. The attempt has been recorded.',
+   558→      }
+   559→    }
+   560→
+   561→    // ---- Segregation of duties: same user across multiple stages ------------
+   562→    const multiStageRule = await tx.soDRule.findFirst({ where: { ruleType: 'MULTI_STAGE_SAME_USER', isActive: true } })
+   563→    if (multiStageRule) {
+   564→      const priorApprovals = await tx.approval.findMany({
+   565→        where: { instanceId: instance.id, userId: params.user.id, action: 'APPROVE' },
+   566→      })
+   567→      const conflicting = priorApprovals.some(
+   568→        (a) => a.cycle < instance.cycle || a.stepIndex < instance.currentStep,
+   569→      )
+   570→      if (conflicting) {
+   571→        await recordViolation(tx, {
+   572→          type: 'SOD_MULTI_STAGE',
+   573→          severity: 'HIGH',
+   574→          message: `Multi-stage approval conflict blocked: ${params.user.email} already approved an earlier stage of ${document.reference}.`,
+   575→          documentId: document.id,
+   576→          instanceId: instance.id,
+   577→          userId: params.user.id,
+   578→          details: { attemptedStage: stage.name },
+   579→          actor: params.user,
+   580→          ip: params.ip,
+   581→          auditAction: 'SOD_VIOLATION_BLOCKED',
+   582→        })
+   583→        return {
+   584→          ok: false,
+   585→          status: 403,
+   586→          code: 'SOD_MULTI_STAGE',
+   587→          message: 'Segregation of duties: you already approved an earlier stage of this request. The attempt has been recorded.',
+   588→        }
+   589→      }
+   590→    }
+   591→
+   592→    // ---- Approval threshold per role ----------------------------------------
+   593→    const rule = await tx.approvalRule.findUnique({ where: { role: params.user.role } })
+   594→    const maxAmount = rule?.maxAmount ?? 0n // least privilege: no rule configured => cannot approve
+   595→    if (params.action === 'APPROVE' && maxAmount !== null && instance.amount > maxAmount) {
+   596→      await recordViolation(tx, {
+   597→        type: 'THRESHOLD_BREACH',
+   598→        severity: 'HIGH',
+   599→        message: `Approval threshold exceeded: ${params.user.email} (role ${params.user.role}, limit ${maxAmount.toString()}) attempted to approve ${document.reference} worth ${instance.amount.toString()}.`,
+   600→        documentId: document.id,
+   601→        instanceId: instance.id,
+   602→        userId: params.user.id,
+   603→        details: { role: params.user.role, limit: maxAmount.toString(), amount: instance.amount.toString() },
+   604→        actor: params.user,
+   605→        ip: params.ip,
+   606→        auditAction: 'THRESHOLD_BREACH_BLOCKED',
+   607→      })
+   608→      return {
+   609→        ok: false,
+   610→        status: 403,
+   611→        code: 'THRESHOLD_EXCEEDED',
+   612→        message: `Your approval limit (${maxAmount.toString()}) is below the amount of this request (${instance.amount.toString()}). The attempt has been recorded.`,
+   613→      }
+   614→    }
+   615→
+   616→    // ---- Persist the decision (bound to the exact document version) ---------
+   617→    const version = await tx.documentVersion.findFirst({
+   618→      where: { documentId: document.id, version: document.currentVersion },
+   619→    })
+   620→    if (!version) return { ok: false, status: 500, code: 'NO_VERSION', message: 'Document version not found.' }
+   621→
+   622→    await tx.approval.create({
+   623→      data: {
+   624→        instanceId: instance.id,
+   625→        stageId: stage.stageId,
+   626→        stageName: stage.name,
+   627→        cycle: instance.cycle,
+   628→        stepIndex: instance.currentStep,
+   629→        action: params.action,
+   630→        userId: params.user.id,
+   631→        userRole: params.user.role,
+   632→        userDepartmentId: params.user.departmentId,
+   633→        delegatedFromId,
+   634→        documentVersionId: version.id,
+   635→        documentHash: version.sha256,
+   636→        comment: params.comment?.trim() ? params.comment.trim() : null,
+   637→        ip: params.ip ?? null,
+   638→      },
+   639→    })
+   640→
+   641→    const auditBase = {
+   642→      actor,
+   643→      entityType: 'document',
+   644→      entityId: document.id,
+   645→      ip: params.ip ?? null,
+   646→    }
+   647→
+   648→    // ---- REJECT: terminal ----------------------------------------------------
+   649→    if (params.action === 'REJECT') {
+   650→      const now = new Date()
+   651→      const updated = await tx.workflowInstance.update({
+   652→        where: { id: instance.id },
+   653→        data: { status: 'REJECTED', completedAt: now },
+   654→      })
+   655→      await tx.document.update({ where: { id: document.id }, data: { status: 'REJECTED' } })
+   656→      await recordAudit(tx, {
+   657→        ...auditBase,
+   658→        action: 'APPROVAL_REJECTED',
+   659→        details: {
+   660→          reference: document.reference,
+   661→          stage: stage.name,
+   662→          rejectedBy: params.user.email,
+   663→          onBehalfOf: delegatedFromId ?? undefined,
+   664→          comment: params.comment ?? null,
+   665→          documentHash: version.sha256,
+   666→          documentVersion: version.version,
+   667→        },
+   668→      })
+   669→      await notify(tx, {
+   670→        userId: document.createdById,
+   671→        type: 'ALERT',
+   672→        title: `${document.reference} rejected at stage "${stage.name}"`,
+   673→        body: params.comment?.trim() ? `Reason: ${params.comment.trim()}` : 'No comment provided.',
+   674→        link: `document:${document.id}`,
+   675→        email: true,
+   676→      })
+   677→      return { ok: true, message: 'Request rejected.', instanceStatus: updated.status, documentStatus: 'REJECTED' }
+   678→    }
+   679→
+   680→    // ---- RETURN FOR CORRECTION: back to the submitter -----------------------
+   681→    if (params.action === 'RETURN_FOR_CORRECTION') {
+   682→      const returnCount = instance.returnCount + 1
+   683→      const updated = await tx.workflowInstance.update({
+   684→        where: { id: instance.id },
+   685→        data: { status: 'RETURNED_FOR_CORRECTION', returnCount },
+   686→      })
+   687→      await tx.document.update({ where: { id: document.id }, data: { status: 'RETURNED' } })
+   688→      await recordAudit(tx, {
+   689→        ...auditBase,
+   690→        action: 'RETURN_FOR_CORRECTION',
+   691→        details: {
+   692→          reference: document.reference,
+   693→          stage: stage.name,
+   694→          returnedBy: params.user.email,
+   695→          comment: params.comment ?? null,
+   696→          returnCount,
+   697→          documentHash: version.sha256,
+   698→          documentVersion: version.version,
+   699→        },
+   700→      })
+   701→      await notify(tx, {
+   702→        userId: document.createdById,
+   703→        type: 'ACTION_REQUIRED',
+   704→        title: `${document.reference} returned for correction (attempt ${returnCount})`,
+   705→        body: params.comment?.trim()
+   706→          ? `Stage "${stage.name}" requests corrections: ${params.comment.trim()}`
+   707→          : `Stage "${stage.name}" requests corrections.`,
+   708→        link: `document:${document.id}`,
+   709→        email: true,
+   710→      })
+   711→      if (returnCount >= 3) {
+   712→        await tx.controlException.create({
+   713→          data: {
+   714→            type: 'REPEATED_RETURN',
+   715→            severity: 'MEDIUM',
+   716→            message: `${document.reference} has been returned for correction ${returnCount} times.`,
+   717→            documentId: document.id,
+   718→            instanceId: instance.id,
+   719→            details: JSON.stringify({ returnCount }),
+   720→          },
+   721→        })
+   722→      }
+   723→      return { ok: true, message: 'Request returned for correction.', instanceStatus: updated.status, documentStatus: 'RETURNED' }
+   724→    }
+   725→
+   726→    // ---- APPROVE: evaluate step completion -----------------------------------
+   727→    const path = parseStagePath(instance)
+   728→    const step = path[instance.currentStep]
+   729→    if (!step) return { ok: false, status: 500, code: 'NO_STEP', message: 'Workflow step not found.' }
+   730→
+   731→    const stepApprovals = await tx.approval.findMany({
+   732→      where: { instanceId: instance.id, cycle: instance.cycle, stepIndex: instance.currentStep, action: 'APPROVE' },
+   733→    })
+   734→    const approvedStageIds = new Set(stepApprovals.map((a) => a.stageId))
+   735→    const requiredStages = step.stages.filter((s) => s.isRequired)
+   736→    const stepComplete = requiredStages.every((s) => approvedStageIds.has(s.stageId))
+   737→
+   738→    await recordAudit(tx, {
+   739→      ...auditBase,
+   740→      action: 'APPROVAL_GRANTED',
+   741→      details: {
+   742→        reference: document.reference,
+   743→        stage: stage.name,
+   744→        approvedBy: params.user.email,
+   745→        onBehalfOf: delegatedFromId ?? undefined,
+   746→        comment: params.comment ?? null,
+   747→        documentHash: version.sha256,
+   748→        documentVersion: version.version,
+   749→      },
+   750→    })
+   751→
+   752→    if (!stepComplete) {
+   753→      // Parallel step: waiting for the other approvers.
+   754→      return {
+   755→        ok: true,
+   756→        message: `Approved at stage "${stage.name}". Waiting for other approvers of this step.`,
+   757→        instanceStatus: instance.status,
+   758→        documentStatus: document.status,
+   759→      }
+   760→    }
+   761→
+   762→    // Step complete — is this the final step?
+   763→    const isLastStep = instance.currentStep >= path.length - 1
+   764→    if (isLastStep) {
+   765→      const now = new Date()
+   766→      await tx.workflowInstance.update({
+   767→        where: { id: instance.id },
+   768→        data: { status: 'APPROVED', completedAt: now },
+   769→      })
+   770→      await tx.document.update({ where: { id: document.id }, data: { status: 'APPROVED' } })
+   771→      await recordAudit(tx, {
+   772→        ...auditBase,
+   773→        action: 'REQUEST_APPROVED',
+   774→        details: {
+   775→          reference: document.reference,
+   776→          workflowCompleted: true,
+   777→          cycles: instance.cycle,
+   778→          documentHash: version.sha256,
+   779→          documentVersion: version.version,
+   780→        },
+   781→      })
+   782→      await notify(tx, {
+   783→        userId: document.createdById,
+   784→        type: 'INFO',
+   785→        title: `${document.reference} fully approved`,
+   786→        body: 'The request completed all approval stages.',
+   787→        link: `document:${document.id}`,
+   788→        email: true,
+   789→      })
+   790→      return { ok: true, message: 'Request fully approved.', instanceStatus: 'APPROVED', documentStatus: 'APPROVED' }
+   791→    }
+   792→
+   793→    // Advance to the next step via compare-and-swap: the update only applies
+   794→    // when the instance is still exactly where we saw it. A concurrent actor
+   795→    // who advanced it first causes count=0 and this transaction aborts with 409.
+   796→    const now = new Date()
+   797→    const advanced = await tx.workflowInstance.updateMany({
+   798→      where: { id: instance.id, status: 'IN_PROGRESS', currentStep: instance.currentStep },
+   799→      data: { currentStep: instance.currentStep + 1, currentStepStartedAt: now, escalatedAt: null, lastOverdueCheckAt: null },
+   800→    })
+   801→    if (advanced.count !== 1) {
+   802→      throw new Prisma.PrismaClientKnownRequestError('Concurrent modification of workflow instance', {
+   803→        code: 'P2004',
+   804→        clientVersion: '6',
+   805→      })
+   806→    }
+   807→
+   808→    // Fast-track (rubber-stamping) detection: consecutive stage approvals
+   809→    // within less than a minute are flagged for audit review.
+   810→    const lastApprovalAt = stepApprovals
+   811→      .map((a) => a.createdAt.getTime())
+   812→      .sort((a, b) => b - a)[0]
+   813→    if (lastApprovalAt && now.getTime() - lastApprovalAt < 60_000) {
+   814→      await tx.controlException.create({
+   815→        data: {
+   816→          type: 'FAST_TRACK_SEQUENCE',
+   817→          severity: 'LOW',
+   818→          message: `Unusually fast approval sequence on ${document.reference} (stage "${stage.name}" approved less than 60s after the previous stage).`,
+   819→          documentId: document.id,
+   820→          instanceId: instance.id,
+   821→          details: JSON.stringify({ gapMs: now.getTime() - lastApprovalAt, stage: stage.name }),
+   822→        },
+   823→      })
+   824→    }
+   825→
+   826→    const nextStep = path[instance.currentStep + 1]
+   827→    const refreshed = await tx.workflowInstance.findUnique({ where: { id: instance.id } })
+   828→    await notifyStepApprovers(tx, refreshed ?? instance, document, nextStep)
+   829→
+   830→    return {
+   831→      ok: true,
+   832→      message: `Approved at stage "${stage.name}". Advanced to "${nextStep.stages.map((s) => s.name).join(' + ')}".`,
+   833→      instanceStatus: 'IN_PROGRESS',
+   834→      documentStatus: 'IN_REVIEW',
+   835→    }
+   836→  }).catch((err): ActOutcome => {
+   837→    if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2004') {
+   838→      return {
+   839→        ok: false,
+   840→        status: 409,
+   841→        code: 'CONCURRENT_MODIFICATION',
+   842→        message: 'This request was just modified by another user. Please refresh and try again.',
+   843→      }
+   844→    }
+   845→    throw err
+   846→  })
+   847→}
+   848→
+   849→// ---------------------------------------------------------------------------
+   850→// Cancellation & suspension
+   851→// ---------------------------------------------------------------------------
+   852→
+   853→export async function cancelDocument(params: {
+   854→  user: SessionUser
+   855→  documentId: string
+   856→  reason: string
+   857→  ip?: string | null
+   858→}): Promise<ActOutcome> {
+   859→  return db.$transaction(async (tx): Promise<ActOutcome> => {
+   860→    const document = await tx.document.findUnique({
+   861→      where: { id: params.documentId },
+   862→      include: { instances: true },
+   863→    })
+   864→    if (!document) return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Document not found.' }
+   865→    const isAdmin = params.user.role === 'SUPER_ADMIN'
+   866→    if (document.createdById !== params.user.id && !isAdmin) {
+   867→      return { ok: false, status: 403, code: 'FORBIDDEN', message: 'Only the creator or an administrator may cancel this request.' }
+   868→    }
+   869→    if (['APPROVED', 'REJECTED', 'CANCELLED'].includes(document.status)) {
+   870→      return { ok: false, status: 409, code: 'INVALID_STATE', message: `Cannot cancel a request in status ${document.status}.` }
+   871→    }
+   872→    const decisive = await tx.approval.count({
+   873→      where: { instanceId: { in: document.instances.map((i) => i.id) }, action: { in: [...DECISIVE_ACTIONS] } },
+   874→    })
+   875→    if (decisive > 0 && !isAdmin) {
+   876→      return {
+   877→        ok: false,
+   878→        status: 409,
+   879→        code: 'APPROVALS_EXIST',
+   880→        message: 'The request has already received approvals and can now only be cancelled by an administrator.',
+   881→      }
+   882→    }
+   883→    const now = new Date()
+   884→    await tx.workflowInstance.updateMany({
+   885→      where: { documentId: document.id, status: { in: ['IN_PROGRESS', 'SUSPENDED', 'RETURNED_FOR_CORRECTION'] } },
+   886→      data: { status: 'CANCELLED', completedAt: now },
+   887→    })
+   888→    await tx.document.update({ where: { id: document.id }, data: { status: 'CANCELLED' } })
+   889→    await recordAudit(tx, {
+   890→      actor: { id: params.user.id, role: params.user.role },
+   891→      action: 'REQUEST_CANCELLED',
+   892→      entityType: 'document',
+   893→      entityId: document.id,
+   894→      details: { reference: document.reference, reason: params.reason, byAdmin: isAdmin },
+   895→      ip: params.ip ?? null,
+   896→    })
+   897→    await notify(tx, {
+   898→      userId: document.createdById,
+   899→      type: 'INFO',
+   900→      title: `${document.reference} cancelled`,
+   901→      body: `Reason: ${params.reason}`,
+   902→      link: `document:${document.id}`,
+   903→    })
+   904→    return { ok: true, message: 'Request cancelled.', instanceStatus: 'CANCELLED', documentStatus: 'CANCELLED' }
+   905→  })
+   906→}
+   907→
+   908→export async function setInstanceSuspension(params: {
+   909→  admin: SessionUser
+   910→  instanceId: string
+   911→  suspend: boolean
+   912→  reason: string
+   913→  ip?: string | null
+   914→}): Promise<ActOutcome> {
+   915→  if (params.admin.role !== 'SUPER_ADMIN') {
+   916→    return { ok: false, status: 403, code: 'FORBIDDEN', message: 'Only administrators may suspend or resume workflows.' }
+   917→  }
+   918→  return db.$transaction(async (tx): Promise<ActOutcome> => {
+   919→    const instance = await tx.workflowInstance.findUnique({ where: { id: params.instanceId }, include: { document: true } })
+   920→    if (!instance) return { ok: false, status: 404, code: 'NOT_FOUND', message: 'Instance not found.' }
+   921→    if (params.suspend && instance.status !== 'IN_PROGRESS') {
+   922→      return { ok: false, status: 409, code: 'INVALID_STATE', message: 'Only in-progress workflows can be suspended.' }
+   923→    }
+   924→    if (!params.suspend && instance.status !== 'SUSPENDED') {
+   925→      return { ok: false, status: 409, code: 'INVALID_STATE', message: 'This workflow is not suspended.' }
+   926→    }
+   927→    const now = new Date()
+   928→    await tx.workflowInstance.update({
+   929→      where: { id: instance.id },
+   930→      data: params.suspend
+   931→        ? { status: 'SUSPENDED', suspendedById: params.admin.id, suspensionReason: params.reason }
+   932→        : { status: 'IN_PROGRESS', suspendedById: null, suspensionReason: null, currentStepStartedAt: now },
+   933→    })
+   934→    await recordAudit(tx, {
+   935→      actor: { id: params.admin.id, role: params.admin.role },
+   936→      action: params.suspend ? 'WORKFLOW_SUSPENDED' : 'WORKFLOW_RESUMED',
+   937→      entityType: 'document',
+   938→      entityId: instance.documentId,
+   939→      details: { reference: instance.document.reference, reason: params.reason },
+   940→      ip: params.ip ?? null,
+   941→    })
+   942→    return {
+   943→      ok: true,
+   944→      message: params.suspend ? 'Workflow suspended.' : 'Workflow resumed (stage deadline restarted).',
+   945→      instanceStatus: params.suspend ? 'SUSPENDED' : 'IN_PROGRESS',
+   946→      documentStatus: instance.document.status,
+   947→    }
+   948→  })
+   949→}
+   950→
+   951→// ---------------------------------------------------------------------------
+   952→// Inbox & visibility
+   953→// ---------------------------------------------------------------------------
+   954→
+   955→export type InboxItem = {
+   956→  instance: WorkflowInstance
+   957→  document: Document & { category: DocumentCategory; department: Department }
+   958→  eligibleStages: EligibleStage[]
+   959→  dueAt: Date | null
+   960→}
+   961→
+   962→/** Instances currently awaiting THIS user's action (directly or via delegation). */
+   963→export async function getInbox(user: SessionUser): Promise<InboxItem[]> {
+   964→  const instances = await db.workflowInstance.findMany({
+   965→    where: { status: 'IN_PROGRESS' },
+   966→    include: {
+   967→      document: { include: { category: true, department: true } },
+   968→    },
+   969→    orderBy: { currentStepStartedAt: 'asc' },
+   970→    take: 500,
+   971→  })
+   972→  const items: InboxItem[] = []
+   973→  for (const instance of instances) {
+   974→    const eligible = await eligibleStagesForUser(db, user, instance, instance.document)
+   975→    if (eligible.length === 0) continue
+   976→    const step = currentStepOf(instance)
+   977→    const slas = (step?.stages ?? []).filter((s) => s.slaHours !== null).map((s) => s.slaHours as number)
+   978→    const slaHours = slas.length > 0 ? Math.min(...slas) : null
+   979→    items.push({
+   980→      instance,
+   981→      document: instance.document,
+   982→      eligibleStages: eligible,
+   983→      dueAt: slaHours !== null ? new Date(instance.currentStepStartedAt.getTime() + slaHours * 3600_000) : null,
+   984→    })
+   985→  }
+   986→  return items
+   987→}
+   988→
+   989→/**
+   990→ * Object-level authorization (anti-IDOR): can this user see the document?
+   991→ * Visibility: creators always; admin/auditor (view.all); department members
+   992→ * when the role grants view.department; and any user who is or was a
+   993→ * participant (approver, delegated approver) of one of its workflow instances.
+   994→ */
+   995→export async function canViewDocument(user: SessionUser, documentId: string): Promise<boolean> {
+   996→  const document = await db.document.findUnique({ where: { id: documentId }, select: { createdById: true, departmentId: true } })
+   997→  if (!document) return false
+   998→  if (hasPermission(user, 'documents.view.all')) return true
+   999→  if (document.createdById === user.id) return true
+  1000→  if (hasPermission(user, 'documents.view.department') && document.departmentId === user.departmentId) return true
+  1001→  if (hasPermission(user, 'documents.view.routed')) {
+  1002→    const participated = await db.approval.findFirst({
+  1003→      where: { instance: { documentId }, userId: user.id },
+  1004→      select: { id: true },
+  1005→    })
+  1006→    if (participated) return true
+  1007→    const instances = await db.workflowInstance.findMany({ where: { documentId }, include: { document: true } })
+  1008→    for (const instance of instances) {
+  1009→      const eligible = await eligibleStagesForUser(db, user, instance, instance.document)
+  1010→      if (eligible.length > 0) return true
+  1011→    }
+  1012→  }
+  1013→  return false
+  1014→}
+  1015→
