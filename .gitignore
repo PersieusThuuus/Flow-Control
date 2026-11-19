@@ -58,3 +58,9 @@ server.log
 /storage/
 /db/*.db
 /db/*.db-journal
+
+# Agent / tool scratch output (never project source)
+/tool-results/
+
+# Runtime PID files
+*.pid

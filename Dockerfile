@@ -32,7 +32,7 @@ COPY . .
 ARG DATABASE_URL="file:./db/custom.db"
 ENV DATABASE_URL=${DATABASE_URL}
 
-RUN bun run build
+RUN bunx prisma generate && bun run build
 
 # ---------------------------------------------------------------------------
 # Stage 2 — minimal runtime

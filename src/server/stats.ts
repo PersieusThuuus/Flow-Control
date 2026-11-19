@@ -41,9 +41,16 @@ function documentWhere(filters: DashboardFilters): PrismaNamespace.DocumentWhere
     ...(filters.categoryId ? { categoryId: filters.categoryId } : {}),
     ...(filters.status ? { status: filters.status } : {}),
     ...(filters.userId ? { createdById: filters.userId } : {}),
-    ...(filters.minAmount !== null && filters.minAmount !== undefined ? { amount: { gte: filters.minAmount } } : {}),
+    ...(filters.minAmount !== null && filters.minAmount !== undefined && filters.maxAmount === null
+      ? { amount: { gte: filters.minAmount } }
+      : {}),
     ...(filters.maxAmount !== null && filters.maxAmount !== undefined
-      ? { amount: { ...(filters.minAmount !== null && filters.minAmount !== undefined ? { gte: filters.minAmount } : {}), lte: filters.maxAmount } }
+      ? {
+          amount: {
+            ...(filters.minAmount !== null && filters.minAmount !== undefined ? { gte: filters.minAmount } : {}),
+            lte: filters.maxAmount,
+          },
+        }
       : {}),
   }
 }
