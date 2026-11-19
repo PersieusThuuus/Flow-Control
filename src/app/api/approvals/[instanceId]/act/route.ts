@@ -21,9 +21,9 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ instanceId
   return handle(async () => {
     assertSameOrigin(req)
     const user = await requireUser()
-    requirePermission(user, 'approvals.act')
     const { instanceId } = await ctx.params
     const body = await parseBody(req, actSchema)
+    if (body.action !== 'COMMENT') requirePermission(user, 'approvals.act')
 
     const result = await actOnInstance({
       user,

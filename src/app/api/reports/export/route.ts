@@ -8,11 +8,12 @@ import {
   requirePermission,
   requireUser,
 } from '@/server/api'
-import { hasPermission } from '@/server/rbac'
 import type { Prisma } from '@prisma/client'
+import { visibleDocumentsWhere } from '@/server/visibility'
 
 function csvEscape(value: unknown): string {
-  const s = value === null || value === undefined ? '' : String(value)
+  const raw = value === null || value === undefined ? '' : String(value)
+  const s = /^[=+\-@\t]/.test(raw) ? `'${raw}` : raw
   if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
   return s
 }
@@ -35,21 +36,7 @@ export async function GET(req: NextRequest) {
       ...(f.q ? { OR: [{ reference: { contains: f.q } }, { title: { contains: f.q } }] } : {}),
     }
 
-    let visibility: Prisma.DocumentWhereInput = {}
-    if (!hasPermission(user, 'documents.view.all')) {
-      const or: Prisma.DocumentWhereInput[] = [{ createdById: user.id }]
-      if (hasPermission(user, 'documents.view.department') && user.departmentId) {
-        or.push({ departmentId: user.departmentId })
-      }
-      const acted = await db.approval.findMany({
-        where: { userId: user.id },
-        select: { instance: { select: { documentId: true } } },
-        distinct: ['instanceId'],
-      })
-      const docIds = acted.map((a) => a.instance.documentId)
-      if (docIds.length > 0) or.push({ id: { in: docIds } })
-      visibility = { OR: or }
-    }
+    const visibility = await visibleDocumentsWhere(user)
 
     const where: Prisma.DocumentWhereInput = { AND: [filters, visibility] }
 

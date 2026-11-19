@@ -40,6 +40,10 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     }
 
     const result = await db.$transaction(async (tx) => {
+      const current = await tx.document.findUnique({ where: { id }, select: { status: true } })
+      if (!current || !['DRAFT', 'RETURNED'].includes(current.status)) {
+        throw new ApiError(409, 'INVALID_STATE', 'A new version can only be added to a draft or a returned document.')
+      }
       const { version } = await addDocumentVersion(tx, {
         documentId: id,
         buffer: validation.buffer,

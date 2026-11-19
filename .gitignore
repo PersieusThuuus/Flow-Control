@@ -58,6 +58,8 @@ server.log
 /storage/
 /db/*.db
 /db/*.db-journal
+/prisma/db/*.db
+/prisma/db/*.db-journal
 
 # Agent / tool scratch output (never project source)
 /tool-results/

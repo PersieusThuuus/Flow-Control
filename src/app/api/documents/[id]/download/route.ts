@@ -26,7 +26,10 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
     const document = await db.document.findUnique({ where: { id } })
     if (!document) throw new ApiError(404, 'NOT_FOUND', 'Document not found.')
 
-    const version = versionParam ? parseInt(versionParam, 10) : document.currentVersion
+    const version = versionParam ? Number(versionParam) : document.currentVersion
+    if (!Number.isInteger(version) || version < 1) {
+      throw new ApiError(422, 'INVALID_VERSION', 'Version must be a positive integer.')
+    }
     const row = await db.documentVersion.findUnique({
       where: { documentId_version: { documentId: id, version } },
     })

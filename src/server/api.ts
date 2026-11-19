@@ -63,6 +63,7 @@ export function handle<T>(fn: () => Promise<T>): Promise<Response> {
 }
 
 export function getClientIp(req: NextRequest): string {
+  if (process.env.TRUST_PROXY_HEADERS !== 'true') return 'unknown'
   const realIp = req.headers.get('x-real-ip')
   if (realIp) return realIp.split(',')[0].trim()
   const forwarded = req.headers.get('x-forwarded-for')
@@ -153,9 +154,14 @@ export function parseFiltersFromUrl(url: URL): {
   const toStr = sp.get('to')
   const minStr = sp.get('minAmount')
   const maxStr = sp.get('maxAmount')
+  const from = fromStr ? new Date(fromStr) : null
+  const to = toStr ? new Date(toStr + 'T23:59:59.999Z') : null
+  if ((from && Number.isNaN(from.getTime())) || (to && Number.isNaN(to.getTime()))) {
+    throw new ApiError(422, 'INVALID_DATE', 'Date filters must be valid dates.')
+  }
   return {
-    from: fromStr ? new Date(fromStr) : null,
-    to: toStr ? new Date(toStr + 'T23:59:59.999Z') : null,
+    from,
+    to,
     departmentId: sp.get('departmentId'),
     categoryId: sp.get('categoryId'),
     status: sp.get('status'),

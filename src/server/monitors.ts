@@ -112,7 +112,7 @@ export async function runControlMonitors(actor?: SessionUser | null, ip?: string
   })
   for (const instance of returnedInstances) {
     const existing = await db.controlException.findFirst({
-      where: { type: 'REPEATED_RETURN', instanceId: instance.id, resolvedAt: null },
+      where: { type: 'REPEATED_RETURN', instanceId: instance.id },
     })
     if (existing) continue
     await db.controlException.create({
@@ -144,7 +144,7 @@ export async function runControlMonitors(actor?: SessionUser | null, ip?: string
   for (const [userId, entry] of rejectionsByCreator) {
     if (entry.count < 3) continue
     const existing = await db.controlException.findFirst({
-      where: { type: 'REPEATED_REJECTION', userId, resolvedAt: null },
+      where: { type: 'REPEATED_REJECTION', userId },
     })
     if (existing) continue
     await db.controlException.create({

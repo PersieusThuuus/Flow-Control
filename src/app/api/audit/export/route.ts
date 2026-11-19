@@ -4,7 +4,8 @@ import { recordAudit } from '@/server/audit'
 import { getClientIp, handle, requirePermission, requireUser, ApiError } from '@/server/api'
 
 function csvEscape(value: unknown): string {
-  const s = value === null || value === undefined ? '' : String(value)
+  const raw = value === null || value === undefined ? '' : String(value)
+  const s = /^[=+\-@\t]/.test(raw) ? `'${raw}` : raw
   if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
   return s
 }

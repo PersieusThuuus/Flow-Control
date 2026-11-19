@@ -15,6 +15,7 @@ import { db } from '@/lib/db'
 import type { Prisma as PrismaNamespace } from '@prisma/client'
 import { hasPermission, type SessionUser } from './rbac'
 import { currentStepOf, parseStagePath } from './engine'
+import { visibleDocumentsWhere } from './visibility'
 
 export type DashboardFilters = {
   from?: Date | null
@@ -58,23 +59,7 @@ function documentWhere(filters: DashboardFilters): PrismaNamespace.DocumentWhere
 /** Documents visible to the user, intersected with dashboard filters. */
 async function scopedDocuments(user: SessionUser, filters: DashboardFilters) {
   const base = documentWhere(filters)
-  if (hasPermission(user, 'documents.view.all')) {
-    return db.document.findMany({ where: base, include: { department: true, category: true, createdBy: true } })
-  }
-  const or: PrismaNamespace.DocumentWhereInput[] = [{ createdById: user.id }]
-  if (hasPermission(user, 'documents.view.department') && user.departmentId) {
-    or.push({ departmentId: user.departmentId })
-  }
-  if (hasPermission(user, 'documents.view.routed')) {
-    const actedInstanceIds = await db.approval.findMany({
-      where: { userId: user.id },
-      select: { instance: { select: { documentId: true } } },
-      distinct: ['instanceId'],
-    })
-    const docIds = actedInstanceIds.map((a) => a.instance.documentId)
-    if (docIds.length > 0) or.push({ id: { in: docIds } })
-  }
-  return db.document.findMany({ where: { AND: [base, { OR: or }] }, include: { department: true, category: true, createdBy: true } })
+  return db.document.findMany({ where: { AND: [base, await visibleDocumentsWhere(user)] }, include: { department: true, category: true, createdBy: true } })
 }
 
 export type DashboardData = Awaited<ReturnType<typeof computeDashboard>>

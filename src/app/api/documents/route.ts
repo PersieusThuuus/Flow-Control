@@ -14,9 +14,9 @@ import {
   requireUser,
   toBigIntAmount,
 } from '@/server/api'
-import { hasPermission } from '@/server/rbac'
 import type { Prisma } from '@prisma/client'
 import { serializeDocumentSummary } from '@/server/serializers'
+import { visibleDocumentsWhere } from '@/server/visibility'
 
 /**
  * GET /api/documents — visible documents with filters and pagination.
@@ -56,31 +56,15 @@ export async function GET(req: NextRequest) {
     }
 
     // Visibility / scope (server-enforced, anti-IDOR).
-    let visibility: Prisma.DocumentWhereInput
+    const visibility = await visibleDocumentsWhere(user)
+    let scopeFilter: Prisma.DocumentWhereInput = {}
     if (scope === 'mine') {
-      visibility = { createdById: user.id }
+      scopeFilter = { createdById: user.id }
     } else if (scope === 'department' && user.departmentId) {
-      visibility = { departmentId: user.departmentId }
-    } else if (hasPermission(user, 'documents.view.all')) {
-      visibility = {}
-    } else {
-      const or: Prisma.DocumentWhereInput[] = [{ createdById: user.id }]
-      if (hasPermission(user, 'documents.view.department') && user.departmentId) {
-        or.push({ departmentId: user.departmentId })
-      }
-      if (hasPermission(user, 'documents.view.routed')) {
-        const acted = await db.approval.findMany({
-          where: { userId: user.id },
-          select: { instance: { select: { documentId: true } } },
-          distinct: ['instanceId'],
-        })
-        const docIds = acted.map((a) => a.instance.documentId)
-        if (docIds.length > 0) or.push({ id: { in: docIds } })
-      }
-      visibility = { OR: or }
+      scopeFilter = { departmentId: user.departmentId }
     }
 
-    const where: Prisma.DocumentWhereInput = { AND: [filters, visibility] }
+    const where: Prisma.DocumentWhereInput = { AND: [filters, visibility, scopeFilter] }
 
     const [total, documents] = await Promise.all([
       db.document.count({ where }),

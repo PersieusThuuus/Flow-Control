@@ -19,6 +19,7 @@ export const SESSION_COOKIE = 'fc_session'
 export const SESSION_TTL_HOURS = 8
 export const MAX_FAILED_LOGINS = 5
 export const LOCKOUT_MINUTES = 15
+const DUMMY_PASSWORD_HASH = hashPassword('FlowControlDummy!123')
 
 function sessionSecret(): string {
   const secret = process.env.SESSION_SECRET
@@ -93,9 +94,9 @@ export async function login(
   const user = await db.user.findUnique({ where: { email: normalized }, include: { department: true } })
   const genericFailure = { ok: false as const, code: 'INVALID_CREDENTIALS' as const, message: 'Invalid email or password.' }
 
-  if (!user) return genericFailure
-  if (!user.isActive) {
-    return { ok: false, code: 'ACCOUNT_DISABLED', message: 'This account has been deactivated. Contact an administrator.' }
+  if (!user) {
+    verifyPassword(password, DUMMY_PASSWORD_HASH)
+    return genericFailure
   }
 
   const now = new Date()
@@ -108,19 +109,28 @@ export async function login(
     }
   }
 
-  if (!verifyPassword(password, user.passwordHash)) {
-    const failedLogins = user.failedLogins + 1
+  const passwordValid = verifyPassword(password, user.passwordHash)
+  if (!passwordValid) {
+    const updatedUser = await db.user.update({
+      where: { id: user.id },
+      data: { failedLogins: { increment: 1 } },
+      select: { failedLogins: true },
+    })
+    const failedLogins = updatedUser.failedLogins
     const shouldLock = failedLogins >= MAX_FAILED_LOGINS
     await db.user.update({
       where: { id: user.id },
       data: {
-        failedLogins,
         lockedUntil: shouldLock ? new Date(now.getTime() + LOCKOUT_MINUTES * 60000) : null,
       },
     })
     return shouldLock
       ? { ok: false, code: 'ACCOUNT_LOCKED', message: `Account locked for ${LOCKOUT_MINUTES} minutes after ${MAX_FAILED_LOGINS} failed attempts.` }
       : genericFailure
+  }
+
+  if (!user.isActive) {
+    return { ok: false, code: 'ACCOUNT_DISABLED', message: 'This account has been deactivated. Contact an administrator.' }
   }
 
   // Success: reset counters, create session.

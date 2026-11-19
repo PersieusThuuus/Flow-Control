@@ -156,7 +156,9 @@ export async function readVersionBytes(storageKey: string): Promise<Buffer> {
 /** Generate the next human-readable document reference (DOC-YYYY-NNNNN). */
 export async function nextDocumentReference(tx: Prisma.TransactionClient): Promise<string> {
   const year = new Date().getFullYear()
-  const count = await tx.document.count()
+  const count = await tx.document.count({
+    where: { createdAt: { gte: new Date(`${year}-01-01T00:00:00.000Z`), lt: new Date(`${year + 1}-01-01T00:00:00.000Z`) } },
+  })
   let n = count + 1
   for (let attempt = 0; attempt < 5; attempt++) {
     const reference = `DOC-${year}-${String(n).padStart(5, '0')}`

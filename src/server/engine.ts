@@ -23,6 +23,7 @@ import { db } from '@/lib/db'
 import { Prisma } from '@prisma/client'
 import type { WorkflowInstance, Document, DocumentCategory, Department } from '@prisma/client'
 import { hasPermission, type RoleKey, type SessionUser } from './rbac'
+import { visibleDocumentsWhere } from './visibility'
 import { recordAudit } from './audit'
 import { notify } from './notify'
 
@@ -583,15 +584,43 @@ export async function actOnInstance(params: {
       }
     }
 
+    // ---- Segregation of duties: conflicting role pair ----------------------
+    const rolePairRules = await tx.soDRule.findMany({ where: { ruleType: 'ROLE_PAIR', isActive: true } })
+    if (params.action === 'APPROVE' && rolePairRules.length > 0) {
+      const priorApprovals = await tx.approval.findMany({
+        where: { instanceId: instance.id, action: 'APPROVE' },
+        select: { userRole: true },
+      })
+      const priorRoles = new Set(priorApprovals.map((approval) => approval.userRole))
+      const conflictingRule = rolePairRules.find(
+        (rule) =>
+          (rule.roleA === params.user.role && rule.roleB && priorRoles.has(rule.roleB)) ||
+          (rule.roleB === params.user.role && rule.roleA && priorRoles.has(rule.roleA)),
+      )
+      if (conflictingRule) {
+        await recordViolation(tx, {
+          type: 'SOD_ROLE_PAIR',
+          severity: (conflictingRule.severity as 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL') ?? 'HIGH',
+          message: `Conflicting role pair approval blocked for ${params.user.email} on ${document.reference}.`,
+          documentId: document.id,
+          instanceId: instance.id,
+          userId: params.user.id,
+          details: { rule: conflictingRule.code, roleA: conflictingRule.roleA, roleB: conflictingRule.roleB },
+          actor: params.user,
+          ip: params.ip,
+          auditAction: 'SOD_VIOLATION_BLOCKED',
+        })
+        return { ok: false, status: 403, code: 'SOD_ROLE_PAIR', message: 'Segregation of duties: these roles may not approve the same request.' }
+      }
+    }
+
     // ---- Segregation of duties: same user across multiple stages ------------
     const multiStageRule = await tx.soDRule.findFirst({ where: { ruleType: 'MULTI_STAGE_SAME_USER', isActive: true } })
     if (multiStageRule) {
       const priorApprovals = await tx.approval.findMany({
         where: { instanceId: instance.id, userId: params.user.id, action: 'APPROVE' },
       })
-      const conflicting = priorApprovals.some(
-        (a) => a.cycle < instance.cycle || a.stepIndex < instance.currentStep,
-      )
+      const conflicting = priorApprovals.some((a) => a.stageId !== stage.stageId)
       if (conflicting) {
         await recordViolation(tx, {
           type: 'SOD_MULTI_STAGE',
@@ -622,7 +651,7 @@ export async function actOnInstance(params: {
     // manager's operational review) are not amount-bound, because higher
     // authority downstream (controller / director) carries the financial
     // responsibility. Rejecting or returning is never limit-bound.
-    const rule = await tx.approvalRule.findUnique({ where: { role: params.user.role } })
+    const rule = await tx.approvalRule.findUnique({ where: { role: stage.approverRole } })
     // No configured rule row => least privilege (cannot approve).
     // A configured rule with maxAmount = null => unlimited authority.
     const maxAmount: bigint | null = rule ? rule.maxAmount : 0n
@@ -633,11 +662,11 @@ export async function actOnInstance(params: {
       await recordViolation(tx, {
         type: 'THRESHOLD_BREACH',
         severity: 'HIGH',
-        message: `Approval threshold exceeded: ${params.user.email} (role ${params.user.role}, limit ${maxAmount.toString()}) attempted to grant the final authorization of ${document.reference} worth ${instance.amount.toString()}.`,
+        message: `Approval threshold exceeded: ${params.user.email} (stage role ${stage.approverRole}, limit ${maxAmount.toString()}) attempted to grant the final authorization of ${document.reference} worth ${instance.amount.toString()}.`,
         documentId: document.id,
         instanceId: instance.id,
         userId: params.user.id,
-        details: { role: params.user.role, limit: maxAmount.toString(), amount: instance.amount.toString() },
+        details: { role: stage.approverRole, actingRole: params.user.role, limit: maxAmount.toString(), amount: instance.amount.toString() },
         actor: params.user,
         ip: params.ip,
         auditAction: 'THRESHOLD_BREACH_BLOCKED',
@@ -1014,7 +1043,6 @@ export async function getInbox(user: SessionUser): Promise<InboxItem[]> {
       document: { include: { category: true, department: true } },
     },
     orderBy: { currentStepStartedAt: 'asc' },
-    take: 500,
   })
   const items: InboxItem[] = []
   for (const instance of instances) {
@@ -1040,6 +1068,9 @@ export async function getInbox(user: SessionUser): Promise<InboxItem[]> {
  * participant (approver, delegated approver) of one of its workflow instances.
  */
 export async function canViewDocument(user: SessionUser, documentId: string): Promise<boolean> {
+  const visibleWhere = await visibleDocumentsWhere(user)
+  const visibleDocument = await db.document.findFirst({ where: { AND: [{ id: documentId }, visibleWhere] }, select: { id: true } })
+  if (visibleDocument) return true
   const document = await db.document.findUnique({ where: { id: documentId }, select: { createdById: true, departmentId: true } })
   if (!document) return false
   if (hasPermission(user, 'documents.view.all')) return true

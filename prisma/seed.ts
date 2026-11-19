@@ -334,7 +334,7 @@ async function main(): Promise<void> {
   const sodRules = [
     { code: 'SOD-SELF', name: 'Self-approval prevention', ruleType: 'SELF_APPROVAL', roleA: null, roleB: null, severity: 'CRITICAL', description: 'A user can never approve a request they created themselves. Enforced as a hard block.' },
     { code: 'SOD-MULTI-STAGE', name: 'Multi-stage separation', ruleType: 'MULTI_STAGE_SAME_USER', roleA: null, roleB: null, severity: 'HIGH', description: 'The same user may not approve two different steps of the same request. Enforced as a hard block.' },
-    { code: 'SOD-ACC-TRES', name: 'Accountant / Treasury incompatibility', ruleType: 'ROLE_PAIR', roleA: 'ACCOUNTANT', roleB: 'TREASURY', severity: 'MEDIUM', description: 'Accounting and treasury duties on the same transaction should not rest with one person. Alert-oriented (single-role users today).' },
+    { code: 'SOD-PUR-TRES', name: 'Purchasing / Treasury incompatibility', ruleType: 'ROLE_PAIR', roleA: 'PURCHASING', roleB: 'TREASURY', severity: 'MEDIUM', description: 'Purchasing and treasury duties may not both approve the same transaction.' },
   ]
   for (const r of sodRules) {
     await db.soDRule.create({ data: r })
