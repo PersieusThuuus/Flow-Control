@@ -104,7 +104,7 @@ export function NotificationsView() {
             <NotificationIcon type={n.type} />
             <span className="min-w-0 flex-1">
               <span className="flex items-center gap-2">
-                {!n.isRead ? <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-500" aria-label="Unread" /> : null}
+                {!n.isRead ? <span className="h-2 w-2 shrink-0 rounded-full bg-[#00b4d8]" aria-label="Unread" /> : null}
                 <span className={cn('truncate text-sm', !n.isRead ? 'font-medium' : 'font-normal')}>{n.title}</span>
               </span>
               {n.body ? <span className="mt-0.5 block line-clamp-2 text-xs text-muted-foreground">{n.body}</span> : null}
@@ -168,7 +168,7 @@ export function NotificationsView() {
       )}
 
       <p className="text-xs text-muted-foreground">
-        Showing the {items.length} most recent notifications. Unread items are marked with a green dot; click a
+        Showing the {items.length} most recent notifications. Unread items have a blue marker; select one to
         notification to open the linked request.
       </p>
     </div>

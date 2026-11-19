@@ -195,12 +195,12 @@ function OverviewTab() {
         >
           <div className="flex items-start gap-2.5">
             {data.auditChain.valid ? (
-              <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden />
+              <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-[#0096c7] dark:text-[#90e0ef]" aria-hidden />
             ) : (
               <ShieldX className="mt-0.5 h-5 w-5 shrink-0 text-red-600 dark:text-red-400" aria-hidden />
             )}
             <div className="min-w-0">
-              <p className={cn('text-sm font-medium', data.auditChain.valid ? 'text-emerald-700 dark:text-emerald-400' : 'text-red-700 dark:text-red-400')}>
+              <p className={cn('text-sm font-medium', data.auditChain.valid ? 'text-[#0077b6] dark:text-[#90e0ef]' : 'text-red-700 dark:text-red-400')}>
                 {data.auditChain.valid ? 'Chain verified' : 'Chain BROKEN'}
               </p>
               <p className="fc-num mt-0.5 text-xs text-muted-foreground">

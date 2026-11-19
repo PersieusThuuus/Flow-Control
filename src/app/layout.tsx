@@ -16,8 +16,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   title: "FlowControl — Workflow & Internal Control Platform",
-  description:
-    "Enterprise workflow, document approval and internal control management: configurable approval chains, segregation of duties, approval thresholds, secure document vault and a tamper-evident audit trail.",
+    description: 'Manage requests, approvals, supporting files, and audit records in one place.',
   icons: {
     icon: "/logo.svg",
   },

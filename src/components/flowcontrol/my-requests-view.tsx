@@ -301,7 +301,7 @@ function NewRequestDialog({
                   Missing: {missing.join(', ')} — a written justification is required to submit.
                 </p>
               ) : (
-                <p className="text-xs text-emerald-600 dark:text-emerald-400">All required evidence is attached.</p>
+                <p className="text-xs text-[#0096c7] dark:text-[#90e0ef]">All required evidence is attached.</p>
               )}
             </div>
           ) : null}
@@ -437,7 +437,7 @@ function SubmitRequestDialog({
               return (
                 <li key={item} className="flex items-center gap-2 text-sm">
                   {ok ? (
-                    <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" aria-hidden />
+                    <CheckCircle2 className="h-4 w-4 shrink-0 text-[#0096c7]" aria-hidden />
                   ) : (
                     <XCircle className="h-4 w-4 shrink-0 text-red-600" aria-hidden />
                   )}
@@ -673,7 +673,7 @@ function CancelRequestDialog({
           maxLength={500}
         />
         <p className="text-xs text-muted-foreground">
-          The reason is recorded in the tamper-evident audit trail. This cannot be undone.
+          The reason is recorded in the audit trail. You cannot undo this action.
         </p>
       </div>
     </ConfirmDialog>

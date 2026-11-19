@@ -268,8 +268,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           {/* Sticky footer: pushed down naturally when content overflows */}
           <footer className="mt-auto border-t bg-background">
             <div className="mx-auto flex w-full max-w-7xl flex-col gap-1 px-3 py-3 text-[11px] text-muted-foreground sm:flex-row sm:items-center sm:justify-between sm:px-5 lg:px-7">
-              <p>FlowControl v1.0 — Enterprise Workflow, Document Approval & Internal Control Platform</p>
-              <p>Internal use only. All approval actions are recorded in the tamper-evident audit trail.</p>
+              <p>FlowControl · request control</p>
+              <p>Internal use only. Approval actions are recorded.</p>
             </div>
           </footer>
         </div>

@@ -126,7 +126,7 @@ function computeStepState(
 function stepIcon(state: StepState) {
   switch (state) {
     case 'done':
-      return <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" aria-hidden />
+      return <CheckCircle2 className="h-4 w-4 text-[#0096c7] dark:text-[#90e0ef]" aria-hidden />
     case 'current':
       return <Clock className="h-4 w-4 text-amber-500" aria-hidden />
     case 'rejected':
@@ -146,7 +146,7 @@ function StageDecisionLine({ approval }: { approval: ApprovalDTO | null }) {
   const behalf = approval.delegatedFromName ? ` on behalf of ${approval.delegatedFromName}` : ''
   if (approval.action === 'APPROVE') {
     return (
-      <p className="mt-2 flex items-start gap-1.5 text-xs text-emerald-600 dark:text-emerald-400">
+      <p className="mt-2 flex items-start gap-1.5 text-xs text-[#0096c7] dark:text-[#90e0ef]">
         <CheckCircle2 className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden />
         Approved by {approval.userName}
         {behalf}
@@ -281,7 +281,7 @@ function ApprovalHistoryTimeline({ approvals }: { approvals: ApprovalDTO[] }) {
             <div className="flex gap-3">
               <div className="mt-0.5 shrink-0">
                 {a.action === 'APPROVE' ? (
-                  <CheckCircle2 className="h-4 w-4 text-emerald-600 dark:text-emerald-400" aria-hidden />
+                  <CheckCircle2 className="h-4 w-4 text-[#0096c7] dark:text-[#90e0ef]" aria-hidden />
                 ) : a.action === 'REJECT' ? (
                   <XCircle className="h-4 w-4 text-red-600 dark:text-red-400" aria-hidden />
                 ) : a.action === 'RETURN_FOR_CORRECTION' ? (
@@ -420,7 +420,7 @@ function ExceptionsList({ exceptions }: { exceptions: ExceptionDTO[] }) {
             ? 'border-l-red-500 bg-red-500/5'
             : x.severity === 'MEDIUM'
               ? 'border-l-amber-500 bg-amber-500/5'
-              : 'border-l-zinc-400'
+              : 'border-l-[#90e0ef]'
         return (
           <li key={x.id} className={`rounded-r-lg border-l-4 p-3 ${tone}`}>
             <div className="flex flex-wrap items-center gap-2">
@@ -440,7 +440,7 @@ function ExceptionsList({ exceptions }: { exceptions: ExceptionDTO[] }) {
             <p className="mt-1.5 text-xs text-muted-foreground">{x.message}</p>
             <p className="mt-1 text-xs text-muted-foreground">Detected {formatDate(x.detectedAt)}</p>
             {x.resolvedAt ? (
-              <p className="mt-1 text-xs text-emerald-600 dark:text-emerald-400">
+              <p className="mt-1 text-xs text-[#0096c7] dark:text-[#90e0ef]">
                 Resolved {formatDateOnly(x.resolvedAt)} — {x.resolution ?? ''}
               </p>
             ) : (
@@ -618,7 +618,7 @@ function SubmitDialog({
             return (
               <li key={item} className="flex items-center gap-2 text-sm">
                 {ok ? (
-                  <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" aria-hidden />
+                  <CheckCircle2 className="h-4 w-4 shrink-0 text-[#0096c7]" aria-hidden />
                 ) : (
                   <XCircle className="h-4 w-4 shrink-0 text-red-600" aria-hidden />
                 )}
@@ -1138,7 +1138,7 @@ export function RequestDetailView() {
             title="Approval History"
             description={
               data.approvals.length > 0
-                ? `${data.approvals.length} recorded decision${data.approvals.length === 1 ? '' : 's'} — every entry is hash-bound and tamper-evident.`
+                ? `${data.approvals.length} recorded decision${data.approvals.length === 1 ? '' : 's'} · each entry includes the document hash.`
                 : 'Decisions recorded by approvers appear here.'
             }
             contentClassName="max-h-[460px] overflow-y-auto fc-scroll"
@@ -1193,7 +1193,7 @@ export function RequestDetailView() {
                     <div className="mt-3 grid grid-cols-2 gap-2">
                       <Button
                         size="sm"
-                        className="bg-emerald-600 text-white hover:bg-emerald-700"
+                        className="bg-[#0077b6] text-white hover:bg-[#023e8a]"
                         onClick={() => {
                           setDecision({ action: 'APPROVE', stageId: es.stageId, stageName: es.name })
                           setDecisionComment('')
@@ -1242,8 +1242,7 @@ export function RequestDetailView() {
                 ))}
               </div>
               <p className="mt-3 text-[11px] leading-relaxed text-muted-foreground">
-                Decisions are bound to the exact document version and hash, then written to the tamper-evident audit
-                trail.
+                Each decision points to the exact document version and its hash in the audit trail.
               </p>
             </SectionCard>
           ) : null}

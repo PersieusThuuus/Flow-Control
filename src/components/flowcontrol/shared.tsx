@@ -43,10 +43,10 @@ export function KpiCard({
 }) {
   const toneClass = {
     default: 'text-foreground',
-    success: 'text-emerald-600 dark:text-emerald-400',
+    success: 'text-[#0096c7] dark:text-[#90e0ef]',
     warning: 'text-amber-600 dark:text-amber-400',
     danger: 'text-red-600 dark:text-red-400',
-    info: 'text-teal-600 dark:text-teal-400',
+    info: 'text-[#0077b6] dark:text-[#48cae4]',
   }[tone]
   return (
     <Card>

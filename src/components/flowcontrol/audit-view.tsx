@@ -203,13 +203,13 @@ function ChainIntegrityCard({ chain, onRerun, verifying }: { chain: ChainVerific
     >
       <div className="space-y-3">
         {chain.valid ? (
-          <div className="flex items-start gap-3 rounded-lg border border-emerald-200 bg-emerald-50 p-4 dark:border-emerald-900 dark:bg-emerald-950/50">
-            <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-600 dark:text-emerald-400" aria-hidden />
+          <div className="flex items-start gap-3 rounded-lg border border-[#90e0ef] bg-[#e9f9fc] p-4 dark:border-[#0077b6] dark:bg-[#023e8a]">
+            <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-[#0096c7] dark:text-[#90e0ef]" aria-hidden />
             <div>
-              <p className="text-sm font-medium text-emerald-800 dark:text-emerald-300">
+              <p className="text-sm font-medium text-[#023e8a] dark:text-[#ade8f4]">
                 Chain verified — {chain.eventCount.toLocaleString('en-US')} events, no tampering detected
               </p>
-              <p className="mt-0.5 text-xs text-emerald-700/80 dark:text-emerald-400/80">
+              <p className="mt-0.5 text-xs text-[#0077b6]/80 dark:text-[#90e0ef]/80">
                 Last verified {timeAgo(chain.verifiedAt)}.
               </p>
             </div>
@@ -854,7 +854,7 @@ function ExceptionsTab() {
                         <TableCell className="max-w-52 truncate text-xs text-muted-foreground">{x.message}</TableCell>
                         <TableCell>
                           {x.resolvedAt ? (
-                            <span className="flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                            <span className="flex items-center gap-1.5 text-xs font-medium text-[#0096c7] dark:text-[#90e0ef]">
                               <CheckCircle2 className="h-3.5 w-3.5" aria-hidden />
                               Resolved
                             </span>
@@ -887,9 +887,9 @@ function ExceptionsTab() {
                                   <span className="font-medium text-foreground">Detected:</span> {formatDate(x.detectedAt)} ({timeAgo(x.detectedAt)})
                                 </p>
                                 {x.resolvedAt ? (
-                                  <div className="rounded-md border border-emerald-200 bg-emerald-50 p-2.5 dark:border-emerald-900 dark:bg-emerald-950/50">
-                                    <p className="font-medium text-emerald-700 dark:text-emerald-400">Resolution — {formatDate(x.resolvedAt)}</p>
-                                    <p className="mt-1 text-emerald-700/90 dark:text-emerald-400/90">{x.resolution}</p>
+                                  <div className="rounded-md border border-[#90e0ef] bg-[#e9f9fc] p-2.5 dark:border-[#0077b6] dark:bg-[#023e8a]">
+                                    <p className="font-medium text-[#0077b6] dark:text-[#90e0ef]">Resolution · {formatDate(x.resolvedAt)}</p>
+                                    <p className="mt-1 text-[#0077b6]/90 dark:text-[#90e0ef]/90">{x.resolution}</p>
                                   </div>
                                 ) : isAdmin ? (
                                   <Button variant="outline" size="sm" onClick={() => setResolveTarget(x)}>
@@ -938,10 +938,10 @@ export function AuditView() {
     <div className="space-y-5">
       <PageHeader
         title="Internal Audit"
-        description="Control exceptions, failed accesses and the tamper-evident audit trail with chain verification."
+        description="Review exceptions, failed access attempts, and audit-chain integrity."
         actions={
           <span className="inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs text-muted-foreground">
-            <ShieldCheck className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400" aria-hidden />
+                            <ShieldCheck className="h-3.5 w-3.5 text-[#0096c7] dark:text-[#90e0ef]" aria-hidden />
             Monitors run automatically when this page opens
           </span>
         }

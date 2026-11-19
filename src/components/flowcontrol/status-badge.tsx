@@ -13,9 +13,9 @@ const variantClasses: Record<badgeVariant, string> = {
   secondary: 'bg-secondary text-secondary-foreground',
   destructive: 'bg-red-600 text-white',
   outline: 'text-foreground border-border',
-  success: 'bg-emerald-600 text-white',
+  success: 'bg-[#0096c7] text-white',
   warning: 'bg-amber-500 text-white',
-  info: 'bg-teal-600 text-white',
+  info: 'bg-[#0077b6] text-white',
 }
 
 export function StatusBadge({ variant, children, className }: { variant: badgeVariant; children: React.ReactNode; className?: string }) {

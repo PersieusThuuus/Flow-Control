@@ -206,7 +206,7 @@ export function ApprovalsView() {
                         {item.stages.length > 0 ? (
                           <Button
                             size="sm"
-                            className="bg-emerald-600 text-white hover:bg-emerald-700"
+                            className="bg-[#0077b6] text-white hover:bg-[#023e8a]"
                             onClick={() => {
                               setQuick(item)
                               setQuickComment('')

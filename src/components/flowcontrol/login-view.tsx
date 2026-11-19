@@ -1,7 +1,6 @@
 // ============================================================================
 // FlowControl — Login
-// Professional split-panel sign-in with demo account shortcuts (demo data
-// only — credentials are documented in README.md and are fictional).
+// Split-panel sign-in with shortcuts for the local demo accounts.
 // ============================================================================
 
 'use client'
@@ -64,40 +63,38 @@ export function LoginView() {
       <main className="flex flex-1 items-center justify-center px-4 py-10">
         <div className="grid w-full max-w-4xl overflow-hidden rounded-xl border shadow-sm md:grid-cols-2">
           {/* Brand panel */}
-          <div className="hidden flex-col justify-between bg-zinc-950 p-8 text-zinc-50 md:flex">
+          <div className="hidden flex-col justify-between bg-[#03045e] p-8 text-[#caf0f8] md:flex">
             <div>
               <div className="flex items-center gap-2.5">
-                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-emerald-600">
+                <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[#00b4d8] text-[#03045e]">
                   <Workflow className="h-5 w-5" />
                 </div>
                 <div>
                   <p className="text-lg font-semibold leading-tight">FlowControl</p>
-                  <p className="text-xs text-zinc-400">Enterprise Workflow & Internal Control</p>
+                  <p className="text-xs text-[#90e0ef]">Requests, approvals, audit</p>
                 </div>
               </div>
-              <p className="mt-8 text-sm leading-relaxed text-zinc-300">
-                Digitize and secure your internal approval processes: purchase requisitions, supplier
-                invoices, expense approvals, contracts and payment authorizations — with configurable
-                workflows, segregation of duties and a tamper-evident audit trail.
+              <p className="mt-8 text-sm leading-relaxed text-[#ade8f4]">
+                Track each request from submission to decision. Keep the file, the approver, and the audit
+                record together.
               </p>
-              <ul className="mt-8 space-y-3 text-sm text-zinc-300">
+              <ul className="mt-8 space-y-3 text-sm text-[#ade8f4]">
                 <li className="flex items-start gap-2.5">
-                  <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" aria-hidden />
-                  Role-based access control with eight business roles
+                  <ShieldCheck className="mt-0.5 h-4 w-4 shrink-0 text-[#48cae4]" aria-hidden />
+                  Access follows each role’s responsibilities
                 </li>
                 <li className="flex items-start gap-2.5">
-                  <Lock className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" aria-hidden />
-                  Segregation of duties and approval thresholds enforced server-side
+                  <Lock className="mt-0.5 h-4 w-4 shrink-0 text-[#48cae4]" aria-hidden />
+                  Approval limits and separation rules run on the server
                 </li>
                 <li className="flex items-start gap-2.5">
-                  <FileSearch className="mt-0.5 h-4 w-4 shrink-0 text-emerald-400" aria-hidden />
-                  Hash-chained audit trail with integrity verification
+                  <FileSearch className="mt-0.5 h-4 w-4 shrink-0 text-[#48cae4]" aria-hidden />
+                  Every decision stays linked to the audit trail
                 </li>
               </ul>
             </div>
-            <p className="text-[11px] text-zinc-500">
-              Electronic approvals recorded by this platform are internal traceability records, not
-              qualified electronic signatures.
+            <p className="text-[11px] text-[#90e0ef]">
+              Approval records support internal traceability. They are not qualified electronic signatures.
             </p>
           </div>
 
@@ -164,7 +161,7 @@ export function LoginView() {
             </form>
 
             <div className="mt-6">
-              <p className="text-xs font-medium text-muted-foreground">Demo accounts (click to fill)</p>
+              <p className="text-xs font-medium text-muted-foreground">Local demo accounts</p>
               <Card className="mt-2 border-dashed">
                 <CardContent className="grid max-h-52 gap-1 overflow-y-auto p-2 fc-scroll">
                   {DEMO_ACCOUNTS.map((acc) => (
@@ -193,8 +190,8 @@ export function LoginView() {
 
       <footer className="mt-auto border-t bg-background">
         <div className="mx-auto flex w-full max-w-4xl flex-col gap-1 px-4 py-3 text-[11px] text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-          <p>FlowControl v1.0 — Enterprise Workflow & Internal Control Platform</p>
-          <p>Unauthorized access attempts are logged and audited.</p>
+          <p>FlowControl · request control</p>
+          <p>Access attempts are logged.</p>
         </div>
       </footer>
     </div>

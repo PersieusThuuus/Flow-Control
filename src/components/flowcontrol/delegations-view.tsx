@@ -252,7 +252,7 @@ export function DelegationsView() {
           <p>
             Delegates act on your behalf; every decision records the delegation chain. Self-approval and threshold
             rules still apply. Delegations are limited to {MAX_DELEGATION_DAYS} days, can be revoked at any time by
-            the delegator or an administrator, and are archived in the tamper-evident audit trail.
+            the delegator or an administrator, and are kept in the audit trail.
           </p>
         </div>
       </SectionCard>
