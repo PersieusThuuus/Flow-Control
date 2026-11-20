@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { ThemeProvider } from "next-themes";
 import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
+import { LanguageProvider } from "@/lib/client/language";
 
 export const metadata: Metadata = {
   title: "FlowControl — Workflow & Internal Control Platform",
@@ -20,7 +21,7 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className="antialiased bg-background text-foreground">
         <ThemeProvider attribute="class" defaultTheme="light" enableSystem={false} disableTransitionOnChange>
-          {children}
+          <LanguageProvider>{children}</LanguageProvider>
           <Toaster richColors position="top-right" closeButton />
         </ThemeProvider>
       </body>

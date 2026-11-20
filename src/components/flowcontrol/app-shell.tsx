@@ -12,6 +12,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useTheme } from 'next-themes'
 import { api } from '@/lib/client/api'
+import { useLanguage } from '@/lib/client/language'
 import { useFlowControlStore, type ViewKey } from '@/lib/client/store'
 import { ROLE_LABELS } from '@/lib/client/format'
 import type { NotificationDTO, RoleKey } from '@/types/flowcontrol'
@@ -62,6 +63,19 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const { user, view, navigate, notifications, unreadCount, setNotifications } = useFlowControlStore()
   const [mobileOpen, setMobileOpen] = useState(false)
   const { theme, setTheme } = useTheme()
+  const { language, setLanguage } = useLanguage()
+  const labels: Record<string, string> = language === 'fr' ? {
+    Dashboard: 'Tableau de bord',
+    'My Requests': 'Mes demandes',
+    'Pending Approvals': 'Approbations en attente',
+    'My Decisions': 'Mes décisions',
+    Delegations: 'Délégations',
+    Notifications: 'Notifications',
+    'Internal Audit': 'Audit interne',
+    Reports: 'Rapports',
+    Administration: 'Administration',
+  } : {}
+  const label = (value: string) => labels[value] ?? value
 
   const pollNotifications = useCallback(async () => {
     try {
@@ -130,7 +144,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               )}
             >
               <Icon className="h-4 w-4 shrink-0" />
-              <span className="truncate">{item.label}</span>
+              <span className="truncate">{label(item.label)}</span>
               {item.key === 'notifications' && unreadCount > 0 ? (
                 <span className="ml-auto rounded-full bg-primary px-1.5 py-0.5 text-[10px] font-semibold text-primary-foreground">
                   {unreadCount > 99 ? '99+' : unreadCount}
@@ -176,8 +190,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium">
-                {nav.find((n) => n.key === view)?.label ?? 'FlowControl'}
+                {label(nav.find((n) => n.key === view)?.label ?? 'FlowControl')}
               </p>
+            </div>
+
+            <div className="flex items-center rounded-md border border-border bg-card p-0.5" aria-label="Language">
+              <button type="button" onClick={() => setLanguage('fr')} className={cn('rounded px-2 py-1 text-[11px] font-semibold', language === 'fr' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground')}>FR</button>
+              <button type="button" onClick={() => setLanguage('en')} className={cn('rounded px-2 py-1 text-[11px] font-semibold', language === 'en' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:text-foreground')}>EN</button>
             </div>
 
             {/* Notifications */}
@@ -248,12 +267,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 <DropdownMenuSeparator />
                 <DropdownMenuItem className="cursor-pointer" onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}>
                   {theme === 'dark' ? <Sun className="mr-2 h-4 w-4" /> : <Moon className="mr-2 h-4 w-4" />}
-                  Toggle theme
+                  {language === 'fr' ? 'Changer le thème' : 'Toggle theme'}
                 </DropdownMenuItem>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem className="cursor-pointer text-red-600 focus:text-red-600" onClick={() => void logout()}>
                   <LogOut className="mr-2 h-4 w-4" />
-                  Sign out
+                  {language === 'fr' ? 'Se déconnecter' : 'Sign out'}
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>

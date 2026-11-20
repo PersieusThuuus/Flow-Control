@@ -7,6 +7,7 @@
 
 import { useState } from 'react'
 import { api, ApiClientError } from '@/lib/client/api'
+import { useLanguage } from '@/lib/client/language'
 import { useFlowControlStore } from '@/lib/client/store'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -29,6 +30,7 @@ const DEMO_ACCOUNTS: { email: string; label: string }[] = [
 ]
 
 export function LoginView() {
+  const { language, setLanguage } = useLanguage()
   const setUser = useFlowControlStore((s) => s.setUser)
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
@@ -108,7 +110,13 @@ export function LoginView() {
                 <p className="text-base font-semibold">FlowControl</p>
               </div>
             </div>
-            <h1 className="text-lg font-semibold">Sign in to your workspace</h1>
+            <div className="flex items-start justify-between gap-3">
+              <h1 className="text-lg font-semibold">{language === 'fr' ? 'Connexion à votre espace' : 'Sign in to your workspace'}</h1>
+              <div className="flex items-center rounded-md border border-border bg-card p-0.5" aria-label="Language">
+                <button type="button" onClick={() => setLanguage('fr')} className={`rounded px-2 py-1 text-[11px] font-semibold ${language === 'fr' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`}>FR</button>
+                <button type="button" onClick={() => setLanguage('en')} className={`rounded px-2 py-1 text-[11px] font-semibold ${language === 'en' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`}>EN</button>
+              </div>
+            </div>
             <p className="mt-1 text-sm text-muted-foreground">
               Use your corporate account. Repeated failures lock the account for 15 minutes.
             </p>

@@ -42,6 +42,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -58,6 +59,9 @@ import {
   Clock,
   Copy,
   CornerUpLeft,
+  Download,
+  Eye,
+  FileText,
   FileUp,
   MessageSquare,
   ShieldAlert,
@@ -456,7 +460,48 @@ function ExceptionsList({ exceptions }: { exceptions: ExceptionDTO[] }) {
 // ---------------------------------------------------------------------------
 // Versions table
 // ---------------------------------------------------------------------------
-function VersionsTable({ docId, versions, currentVersion }: { docId: string; versions: DocumentDetailDTO['versions']; currentVersion: number }) {
+function PreviewDialog({ docId, version, instance, approvals, open, onOpenChange }: { docId: string; version: DocumentDetailDTO['versions'][number] | null; instance: InstanceDTO | null; approvals: ApprovalDTO[]; open: boolean; onOpenChange: (open: boolean) => void }) {
+  if (!version) return null
+  const previewable = version.mimeType === 'application/pdf' || version.mimeType.startsWith('image/')
+  const fileUrl = `/api/documents/${docId}/download?version=${version.version}`
+  const stageStatus = (stepIndex: number, stageId: string) => {
+    const approval = approvals.find((item) => item.cycle === instance?.cycle && item.stepIndex === stepIndex && item.stageId === stageId && ['APPROVE', 'REJECT', 'RETURN_FOR_CORRECTION'].includes(item.action))
+    if (!approval) return { label: 'Pending', approval: null }
+    if (approval.action === 'APPROVE') return { label: 'Approved', approval }
+    if (approval.action === 'REJECT') return { label: 'Rejected', approval }
+    return { label: 'Changes requested', approval }
+  }
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-6xl overflow-hidden">
+        <DialogHeader>
+          <DialogTitle>Document preview · v{version.version}</DialogTitle>
+          <DialogDescription>The file and its internal approval trail. These approvals record company authorization; they are not qualified electronic signatures.</DialogDescription>
+        </DialogHeader>
+        <div className="grid max-h-[75vh] gap-4 overflow-y-auto lg:grid-cols-[minmax(0,1fr)_300px]">
+          <div className="min-h-[420px] overflow-hidden rounded-lg border bg-muted/30">
+            {previewable ? (version.mimeType === 'application/pdf' ? <iframe title={`Preview of ${version.fileName}`} src={fileUrl} className="h-[60vh] w-full" /> : <div className="flex h-full min-h-[420px] items-center justify-center p-4"><img src={fileUrl} alt={version.fileName} className="max-h-[58vh] max-w-full object-contain" /></div>) : (
+              <div className="flex h-full min-h-[420px] flex-col items-center justify-center gap-3 p-6 text-center">
+                <FileText className="h-10 w-10 text-primary" aria-hidden />
+                <p className="font-medium">Preview unavailable for this file type.</p>
+                <p className="text-sm text-muted-foreground">Download the Word or Excel file to open it.</p>
+                <Button asChild variant="outline"><a href={fileUrl} download><Download className="mr-2 h-4 w-4" aria-hidden />Download file</a></Button>
+              </div>
+            )}
+          </div>
+          <div className="rounded-lg border bg-card p-4">
+            <h3 className="font-semibold">Approval trail</h3>
+            <p className="mt-1 text-xs text-muted-foreground">Each department or responsible role appears at its workflow step.</p>
+            {instance ? <div className="mt-4 space-y-4">{instance.stagePath.map((step, stepIndex) => <div key={`${step.sequence}-${stepIndex}`} className="border-l-2 border-primary/30 pl-3"><p className="text-xs font-semibold uppercase tracking-wide text-primary">Step {stepIndex + 1}</p><div className="mt-2 space-y-2">{step.stages.map((stage) => { const state = stageStatus(stepIndex, stage.stageId); return <div key={stage.stageId} className="rounded-md bg-muted/40 p-2.5"><div className="flex items-start justify-between gap-2"><div><p className="text-sm font-medium">{stage.name}</p><p className="text-xs text-muted-foreground">{ROLE_LABELS[stage.approverRole]} · {stage.departmentScope === 'DOCUMENT' ? 'Document department' : stage.departmentScope === 'FIXED' ? 'Assigned department' : 'Any department'}</p></div><Badge variant={state.label === 'Approved' ? 'default' : state.label === 'Pending' ? 'secondary' : 'destructive'}>{state.label}</Badge></div>{state.approval ? <p className="mt-2 text-xs text-muted-foreground">{state.approval.userName} · {formatDate(state.approval.createdAt)}{state.approval.delegatedFromName ? ` · on behalf of ${state.approval.delegatedFromName}` : ''}</p> : null}</div> })}</div></div>)}</div> : <p className="mt-4 text-sm text-muted-foreground">No approval workflow has started for this document.</p>}
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  )
+}
+
+function VersionsTable({ docId, versions, currentVersion, instance, approvals }: { docId: string; versions: DocumentDetailDTO['versions']; currentVersion: number; instance: InstanceDTO | null; approvals: ApprovalDTO[] }) {
+  const [previewVersion, setPreviewVersion] = useState<DocumentDetailDTO['versions'][number] | null>(null)
   const copyHash = async (hash: string) => {
     try {
       await navigator.clipboard.writeText(hash)
@@ -523,20 +568,22 @@ function VersionsTable({ docId, versions, currentVersion }: { docId: string; ver
                   <p className="truncate text-xs text-muted-foreground">{v.note ?? '—'}</p>
                 </TableCell>
                 <TableCell className="text-right">
-                  <a
-                    href={`/api/documents/${docId}/download?version=${v.version}`}
-                    target={isPdf ? '_blank' : undefined}
-                    rel="noreferrer"
-                    className="text-sm font-medium text-primary underline-offset-4 hover:underline"
-                  >
-                    Download
-                  </a>
+                  <div className="flex items-center justify-end gap-2">
+                    <Button type="button" variant="outline" size="sm" onClick={() => setPreviewVersion(v)}>
+                      <Eye className="mr-1.5 h-3.5 w-3.5" aria-hidden />
+                      Preview
+                    </Button>
+                    <a href={`/api/documents/${docId}/download?version=${v.version}`} target={isPdf ? '_blank' : undefined} rel="noreferrer" className="text-sm font-medium text-primary underline-offset-4 hover:underline">
+                      Download
+                    </a>
+                  </div>
                 </TableCell>
               </TableRow>
             )
           })}
         </TableBody>
       </Table>
+      <PreviewDialog docId={docId} version={previewVersion} instance={instance} approvals={approvals} open={previewVersion !== null} onOpenChange={(open) => { if (!open) setPreviewVersion(null) }} />
     </div>
   )
 }
@@ -1157,7 +1204,7 @@ export function RequestDetailView() {
             {data.versions.length === 0 ? (
               <EmptyState title="No versions" />
             ) : (
-              <VersionsTable docId={doc.id} versions={data.versions} currentVersion={doc.currentVersion} />
+              <VersionsTable docId={doc.id} versions={data.versions} currentVersion={doc.currentVersion} instance={latestInstance} approvals={data.approvals} />
             )}
           </SectionCard>
 
